@@ -28,6 +28,7 @@ from nemo.collections.asr.data.audio_to_text_dali import AudioToCharDALIDataset,
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.wer import WER
+from nemo.collections.asr.metrics.meeteval_mt_wer import MeetevalMTWER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.parts.mixins import ASRModuleMixin, ASRTranscriptionMixin, InterCTCMixin, TranscribeConfig
 from nemo.collections.asr.parts.mixins.transcription import GenericTranscriptionType, TranscriptionReturnType
@@ -105,6 +106,12 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,
+            log_prediction=self._cfg.get("log_prediction", False),
+        )
+
+        self.meeteval_mt_wer = MeetevalMTWER(
+            decoding=self.decoding,
+            dist_sync_on_step=False,
             log_prediction=self._cfg.get("log_prediction", False),
         )
 
@@ -556,7 +563,7 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids = batch
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
             log_probs, encoded_len, predictions = self.forward(
                 processed_signal=signal, processed_signal_length=signal_len
@@ -628,7 +635,7 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids = batch
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
             log_probs, encoded_len, predictions = self.forward(
                 processed_signal=signal, processed_signal_length=signal_len
@@ -648,16 +655,25 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
             log_prefix="val_",
         )
 
-        self.wer.update(
+        # self.wer.update(
+        #     predictions=log_probs,
+        #     targets=transcript,
+        #     targets_lengths=transcript_len,
+        #     predictions_lengths=encoded_len,
+        # )
+        # wer, wer_num, wer_denom = self.wer.compute()
+        # self.wer.reset()
+        # metrics.update({'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer})
+        metrics.update({'val_loss': loss_value})
+
+        self.meeteval_mt_wer.update(
             predictions=log_probs,
+            predictions_lengths=encoded_len,
             targets=transcript,
             targets_lengths=transcript_len,
-            predictions_lengths=encoded_len,
+            utt_ids=utt_ids,
+            spk_ids=spk_ids,
         )
-        wer, wer_num, wer_denom = self.wer.compute()
-        self.wer.reset()
-        metrics.update({'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer})
-
         self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
 
         # Reset access registry
@@ -673,6 +689,106 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
         else:
             self.validation_step_outputs.append(metrics)
         return metrics
+
+    def on_validation_epoch_end(self, sync_metrics: bool = False) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
+        """
+        Default DataLoader for Validation set which automatically supports multiple data loaders
+        via `multi_validation_epoch_end`.
+
+        If multi dataset support is not required, override this method entirely in base class.
+        In such a case, there is no need to implement `multi_validation_epoch_end` either.
+
+        .. note::
+            If more than one data loader exists, and they all provide `val_loss`,
+            only the `val_loss` of the first data loader will be used by default.
+            This default can be changed by passing the special key `val_dl_idx: int`
+            inside the `validation_ds` config.
+
+        Args:
+            outputs: Single or nested list of tensor outputs from one or more data loaders.
+
+        Returns:
+            A dictionary containing the union of all items from individual data_loaders,
+            along with merged logs from all data loaders.
+        """
+        print("on_validation_epoch_end")
+        # Case where we dont provide data loaders
+        if self.validation_step_outputs is not None and len(self.validation_step_outputs) == 0:
+            return {}
+
+        # Case where we provide exactly 1 data loader
+        if isinstance(self.validation_step_outputs[0], dict):
+            output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
+            cp_wer, cp_ins, cp_del, cp_sub, cp_len = self.meeteval_mt_wer.compute()
+            output_dict['log'].update({'val/cp_wer': cp_wer, 'val/cp_ins': cp_ins, 'val/cp_del': cp_del, 'val/cp_sub': cp_sub, 'val/cp_len': cp_len})
+            self.meeteval_mt_wer.reset()
+
+            if output_dict is not None and 'log' in output_dict:
+                self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)
+
+            self.validation_step_outputs.clear()  # free memory
+            return output_dict
+
+        else:  # Case where we provide more than 1 data loader
+            output_dict = {'log': {}}
+
+            # The output is a list of list of dicts, outer list corresponds to dataloader idx
+            for dataloader_idx, val_outputs in enumerate(self.validation_step_outputs):
+                # Get prefix and dispatch call to multi epoch end
+                dataloader_prefix = self.get_validation_dataloader_prefix(dataloader_idx)
+                dataloader_logs = self.multi_validation_epoch_end(val_outputs, dataloader_idx=dataloader_idx)
+
+                # If result was not provided, generate empty dict
+                dataloader_logs = dataloader_logs or {}
+
+                # Perform `val_loss` resolution first (if provided outside logs)
+                if 'val_loss' in dataloader_logs:
+                    if 'val_loss' not in output_dict and dataloader_idx == self._val_dl_idx:
+                        output_dict['val_loss'] = dataloader_logs['val_loss']
+
+                # For every item in the result dictionary
+                for k, v in dataloader_logs.items():
+                    # If the key is `log`
+                    if k == 'log':
+                        # Parse every element of the log, and attach the prefix name of the data loader
+                        log_dict = {}
+
+                        for k_log, v_log in v.items():
+                            # If we are logging the metric, but dont provide it at result level,
+                            # store it twice - once in log and once in result level.
+                            # Also mark log with prefix name to avoid log level clash with other data loaders
+                            if k_log not in output_dict['log'] and dataloader_idx == self._val_dl_idx:
+                                new_k_log = k_log
+
+                                # Also insert duplicate key with prefix for ease of comparison / avoid name clash
+                                log_dict[dataloader_prefix + k_log] = v_log
+
+                            else:
+                                # Simply prepend prefix to key and save
+                                new_k_log = dataloader_prefix + k_log
+
+                            # Store log value
+                            log_dict[new_k_log] = v_log
+
+                        # Update log storage of individual data loader
+                        output_logs = output_dict['log']
+                        output_logs.update(log_dict)
+
+                        # Update global log storage
+                        output_dict['log'] = output_logs
+
+                    else:
+                        # If any values are stored outside 'log', simply prefix name and store
+                        new_k = dataloader_prefix + k
+                        output_dict[new_k] = v
+
+                self.validation_step_outputs[dataloader_idx].clear()  # free memory
+
+            if 'log' in output_dict:
+                self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)
+
+            # return everything else
+            return output_dict
 
     def multi_validation_epoch_end(self, outputs, dataloader_idx: int = 0):
         metrics = super().multi_validation_epoch_end(outputs, dataloader_idx)

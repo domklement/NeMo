@@ -60,13 +60,13 @@ def _speech_collate_fn(batch, pad_id):
                assumes the signals are 1d torch tensors (i.e. mono audio).
     """
     packed_batch = list(zip(*batch))
-    if len(packed_batch) == 7:
-        _, audio_lengths, _, tokens_lengths, _, stno_mask_lengths, sample_ids = packed_batch
-    elif len(packed_batch) == 6:
+    if len(packed_batch) == 9:
+        _, audio_lengths, _, tokens_lengths, _, stno_mask_lengths, utt_ids, spk_ids, sample_ids = packed_batch
+    elif len(packed_batch) == 8:
         sample_ids = None
-        _, audio_lengths, _, tokens_lengths, _, stno_mask_lengths = packed_batch
+        _, audio_lengths, _, tokens_lengths, _, stno_mask_lengths, utt_ids, spk_ids = packed_batch
     else:
-        raise ValueError("Expects 4 or 5 tensors in the batch!")
+        raise ValueError("Expects 8 or 9 tensors in the batch!")
     max_audio_len = 0
     has_audio = audio_lengths[0] is not None
     if has_audio:
@@ -80,10 +80,10 @@ def _speech_collate_fn(batch, pad_id):
 
     audio_signal, tokens, stno_masks = [], [], []
     for b in batch:
-        if len(b) == 6:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len = b
+        if len(b) == 8:
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id = b
         else:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len = b
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, _ = b
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
@@ -118,11 +118,15 @@ def _speech_collate_fn(batch, pad_id):
         stno_mask_lengths = torch.stack(stno_mask_lengths)
     else:
         stno_masks, stno_mask_lengths = None, None
+
+    utt_ids = torch.tensor(utt_ids, dtype=torch.int32)
+    spk_ids = torch.tensor(spk_ids, dtype=torch.int32)
+    
     if sample_ids is None:
-        return audio_signal, audio_lengths, tokens, tokens_lengths, stno_masks, stno_mask_lengths
+        return audio_signal, audio_lengths, tokens, tokens_lengths, stno_masks, stno_mask_lengths, utt_ids, spk_ids
     else:
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
-        return audio_signal, audio_lengths, tokens, tokens_lengths, stno_masks, stno_mask_lengths, sample_ids
+        return audio_signal, audio_lengths, tokens, tokens_lengths, stno_masks, stno_mask_lengths, utt_ids, spk_ids, sample_ids
 
 
 class ASRManifestProcessor:
@@ -453,6 +457,8 @@ class _AudioTextDataset(Dataset):
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
+            'utterance_id': NeuralType(tuple('B'), LengthsType()),
+            'speaker_id': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 
@@ -499,7 +505,7 @@ class _AudioTextDataset(Dataset):
             # Create new collection by unflattening text_tokens
             for sample in self.manifest_processor.collection:
                 # Get unique speakers from text_tokens
-                speakers = list(set(x['speaker'] for x in sample.text_tokens))
+                speakers = sorted(list(set(x['speaker'] for x in sample.text_tokens)))
                 for s in speakers:
                     self.per_spk_collection.append((sample, s))
             
@@ -552,11 +558,10 @@ class _AudioTextDataset(Dataset):
         )
         f, fl = features, torch.tensor(features.shape[0]).long()
 
-        speakers = list(set(x['speaker'] for x in sample.text_tokens))
+        speakers = sorted(list(set(x['speaker'] for x in sample.text_tokens)))
         speakers_idx = {spk: i for i, spk in enumerate(speakers)}
         rand_spk = spk if self.val else random.choice(list(speakers))
         speakers_tokens = []
-
         downsampled_freq = 16000 / self.audio_downsampling_factor
         downsampled_fl_length = fl if fl % self.audio_downsampling_factor == 0 else fl + (self.audio_downsampling_factor - (fl % self.audio_downsampling_factor))
         downsampled_fl_length = int(downsampled_fl_length / self.audio_downsampling_factor)
@@ -573,9 +578,9 @@ class _AudioTextDataset(Dataset):
         t, tl = self.manifest_processor.process_text_by_sample(speakers_tokens)
 
         if self.return_sample_id:
-            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long(), index
+            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long(), sample.id, speakers_idx[rand_spk], index
         else:
-            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long()
+            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long(), sample.id, speakers_idx[rand_spk]
 
         return output
 
@@ -728,6 +733,8 @@ class AudioToBPEAndSTNODataset(_AudioTextDataset):
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'stno_masks': NeuralType(('B', 'S', 'T'), MaskType()),
             'stno_mask_length': NeuralType(tuple('B'), LengthsType()),
+            'utterance_id': NeuralType(tuple('B'), VoidType()),
+            'speaker_id': NeuralType(tuple('B'), VoidType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 

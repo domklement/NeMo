@@ -25,6 +25,7 @@ from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.wer import WER
+from nemo.collections.asr.metrics.meeteval_mt_wer import MeetevalMTWER
 from nemo.collections.asr.models.ctc_models_stno import EncDecCTCSTNOModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCBPEDecoding, CTCBPEDecodingConfig
@@ -90,6 +91,12 @@ class EncDecCTCModelBPESTNO(EncDecCTCSTNOModel, ASRBPEMixin):
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,
+            log_prediction=self._cfg.get("log_prediction", False),
+        )
+
+        self.meeteval_mt_wer = MeetevalMTWER(
+            decoding=self.decoding,
+            dist_sync_on_step=False,
             log_prediction=self._cfg.get("log_prediction", False),
         )
 

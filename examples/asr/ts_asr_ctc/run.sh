@@ -3,6 +3,8 @@
 export WANDB_API_KEY="029a7cc91a821854880a156d05653e9b79d9e7d6"
 export WANDB_MODE="online"
 
+
+
 python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \
     --config-name="fast-conformer_ctc_bpe_stno.yaml" \
@@ -28,8 +30,10 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     exp_manager.resume_ignore_no_checkpoint=True \
     exp_manager.exp_dir="/home/jovyan/NeMo/nemo_experiments" \
     exp_manager.create_wandb_logger=True \
-    exp_manager.wandb_logger_kwargs.name="fastconformer_ctc_bpe_stno_nsf_test_v11" \
-    exp_manager.wandb_logger_kwargs.project="nemo_tests"
+    exp_manager.wandb_logger_kwargs.name="fastconformer_ctc_bpe_stno_nsf_test_v12" \
+    exp_manager.wandb_logger_kwargs.project="nemo_tests" \
+    exp_manager.checkpoint_callback_params.monitor="val/cp_wer" \
+    name="FastConformer-CTC-BPE-cpwer_scoring"
 
 # python examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
 #     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \
