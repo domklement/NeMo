@@ -129,16 +129,27 @@ class MeetevalMTWER(Metric):
 
         assert len(decoded_preds) == len(decoded_targets) == len(utt_ids) == len(spk_ids)
 
+        # It might happen that when running validation using multiple GPUS, # of samples is not divisible by # of GPUS => some exapmles are duplicated (batch padding).
+        # Hence, we need to keep track of already processed pairs (utt_id, spk_id) to avoid double counting some errors.
+        already_processed_pairs = set()
         gt_segments = []
         for i in range(len(decoded_targets)):
+            if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
+                continue
+            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
             gt_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
                                              speaker=spk_ids[i].item(), 
                                              words=decoded_targets[i], 
                                              start=0, 
                                              end=1))
         gt_segments = SegLST(segments=gt_segments)
+        
+        already_processed_pairs = set()
         pred_segments = []
         for i in range(len(decoded_preds)):
+            if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
+                continue
+            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
             pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
                                                speaker=spk_ids[i].item(), 
                                                words=decoded_preds[i], 
