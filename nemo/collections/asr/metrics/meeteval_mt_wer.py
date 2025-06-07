@@ -165,6 +165,8 @@ class MeetevalMTWER(Metric):
         current_ts_start = 0
         for i in range(len(preds_lengths)):
             if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
+                current_start += preds_lengths[i]
+                current_ts_start += preds_word_timestamps_lengths[i]
                 continue
             
             already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
@@ -176,10 +178,12 @@ class MeetevalMTWER(Metric):
                                                    words='', 
                                                    start_time=0, 
                                                    end_time=1))
+                current_start += preds_lengths[i]
+                current_ts_start += preds_word_timestamps_lengths[i]
                 continue
 
             word_timestamps = preds_word_timestamps[current_ts_start:current_ts_start + preds_word_timestamps_lengths[i].detach().cpu()]
-            assert len(word_timestamps) == len(words), "Number of word timestamps must match number of words"
+            assert len(word_timestamps) == len(words), f"Number of word timestamps must match number of words: {len(word_timestamps)} != {len(words)}, {word_timestamps} != {words}"
 
             current_start += preds_lengths[i]
             current_ts_start += preds_word_timestamps_lengths[i]
