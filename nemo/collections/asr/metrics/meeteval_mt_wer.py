@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import meeteval
 from meeteval.io.seglst import SegLstSegment, SegLST
@@ -41,6 +41,8 @@ class MeetevalMTWER(Metric):
         dist_sync_on_step=False,
         fold_consecutive=True,
         sync_on_compute=True,
+        embed_duration=0.08, # 80ms - 12.5hz with 8x downsampling conformer
+        output_per_word_timestamps=True,
     ):
         super().__init__(dist_sync_on_step=dist_sync_on_step, sync_on_compute=sync_on_compute)
 
@@ -49,18 +51,21 @@ class MeetevalMTWER(Metric):
         self.log_prediction = log_prediction
         self.fold_consecutive = fold_consecutive
         self.batch_dim_index = batch_dim_index
+        self.embed_duration = embed_duration
+        self.output_per_word_timestamps = output_per_word_timestamps
 
         self.decode = None
         if isinstance(self.decoding, AbstractRNNTDecoding):
             self.decode = lambda predictions, predictions_lengths, predictions_mask, input_ids, targets: self.decoding.rnnt_decoder_predictions_tensor(
-                encoder_output=predictions, encoded_lengths=predictions_lengths
+                encoder_output=predictions, encoded_lengths=predictions_lengths,
+                return_hypotheses=True,
             )
         elif isinstance(self.decoding, AbstractCTCDecoding):
             self.decode = lambda predictions, predictions_lengths, predictions_mask, input_ids, targets: self.decoding.ctc_decoder_predictions_tensor(
                 decoder_outputs=predictions,
                 decoder_lengths=predictions_lengths,
                 fold_consecutive=self.fold_consecutive,
-                return_hypotheses=False,
+                return_hypotheses=True,
             )
         elif isinstance(self.decoding, AbstractMultiTaskDecoding):
             self.decode = lambda predictions, prediction_lengths, predictions_mask, input_ids, targets: self.decoding.decode_predictions_tensor(
@@ -74,8 +79,8 @@ class MeetevalMTWER(Metric):
 
         self.add_state("preds", default=[], dist_reduce_fx="cat")
         self.add_state("preds_lengths", default=[], dist_reduce_fx="cat")
-        self.add_state("targets", default=[], dist_reduce_fx="cat")
-        self.add_state("targets_lengths", default=[], dist_reduce_fx="cat")
+        self.add_state("preds_word_timestamps", default=[], dist_reduce_fx="cat")
+        self.add_state("preds_word_timestamps_lengths", default=[], dist_reduce_fx="cat")
         self.add_state("utt_ids", default=[], dist_reduce_fx="cat")
         self.add_state("spk_ids", default=[], dist_reduce_fx="cat")
 
@@ -83,8 +88,6 @@ class MeetevalMTWER(Metric):
         self,
         predictions: torch.Tensor,
         predictions_lengths: torch.Tensor,
-        targets: torch.Tensor,
-        targets_lengths: torch.Tensor,
         utt_ids: torch.Tensor,
         spk_ids: torch.Tensor,
     ):
@@ -95,70 +98,24 @@ class MeetevalMTWER(Metric):
             hyp_ids = [torch.tensor(self.decoding.tokenizer.text_to_ids(x.text), dtype=torch.int32).to(predictions.device) for x in decoded]
             hyp_lens = [torch.tensor(len(x), dtype=torch.int32).to(predictions_lengths.device) for x in hyp_ids]
 
-            for i, target in enumerate(targets):
-                self.targets.append(
-                    target[:targets_lengths[i]].detach()
-                )
+            # assert type(decoded[0].timestamp) == dict, "Timestamp must be a dict"
+            # assert 'word' in decoded[0].timestamp, "Word timestamps must be present"
+
+            for i, hyp in enumerate(decoded):
+                if not hyp.text:
+                    self.preds_word_timestamps.append(torch.tensor([], dtype=torch.int32, device=predictions.device))
+                    self.preds_word_timestamps_lengths.append(torch.tensor(0, dtype=torch.int32, device=predictions.device))
+                else:
+                    self.preds_word_timestamps.append(torch.tensor([[w['start_offset'], w['end_offset']] for w in hyp.timestamp['word']], dtype=torch.int32, device=predictions.device))
+                    self.preds_word_timestamps_lengths.append(torch.tensor(len(hyp.timestamp['word']), dtype=torch.int32, device=predictions.device))
 
             self.preds.extend(hyp_ids)
             self.preds_lengths.extend(hyp_lens)
-            # self.targets.extend(targets.detach())
-            self.targets_lengths.extend(targets_lengths.detach())
             self.utt_ids.extend(utt_ids.detach())
             self.spk_ids.extend(spk_ids.detach())
 
-    def compute(self):
-        preds = dim_zero_cat(self.preds)
-        preds_lengths = dim_zero_cat(self.preds_lengths)
-        targets = dim_zero_cat(self.targets)
-        targets_lengths = dim_zero_cat(self.targets_lengths)
-        utt_ids = dim_zero_cat(self.utt_ids)
-        spk_ids = dim_zero_cat(self.spk_ids)
-
-        decoded_targets = []
-        current_start = 0
-        for i in range(len(targets_lengths)):
-            decoded_targets.append(self.decoding.decode_tokens_to_str(targets[current_start:current_start + targets_lengths[i].detach().cpu()]))
-            current_start += targets_lengths[i]
-
-        decoded_preds = []
-        current_start = 0
-        for i in range(len(preds_lengths)):
-            decoded_preds.append(self.decoding.decode_tokens_to_str(preds[current_start:current_start + preds_lengths[i]].detach().cpu()))
-            current_start += preds_lengths[i]
-
-        assert len(decoded_preds) == len(decoded_targets) == len(utt_ids) == len(spk_ids)
-
-        # It might happen that when running validation using multiple GPUS, # of samples is not divisible by # of GPUS => some exapmles are duplicated (batch padding).
-        # Hence, we need to keep track of already processed pairs (utt_id, spk_id) to avoid double counting some errors.
-        already_processed_pairs = set()
-        gt_segments = []
-        for i in range(len(decoded_targets)):
-            if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
-                continue
-            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
-            gt_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
-                                             speaker=spk_ids[i].item(), 
-                                             words=decoded_targets[i], 
-                                             start=0, 
-                                             end=1))
-        gt_segments = SegLST(segments=gt_segments)
-        
-        already_processed_pairs = set()
-        pred_segments = []
-        for i in range(len(decoded_preds)):
-            if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
-                continue
-            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
-            pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
-                                               speaker=spk_ids[i].item(), 
-                                               words=decoded_preds[i], 
-                                               start=0, 
-                                               end=1))
-        pred_segments = SegLST(segments=pred_segments)
-
-        res = meeteval.wer.cpwer(reference=gt_segments, hypothesis=pred_segments)
-        
+    @staticmethod
+    def _process_metric_res(res):
         length = 0
         insertions = 0
         deletions = 0
@@ -168,5 +125,98 @@ class MeetevalMTWER(Metric):
             insertions += res[i].insertions
             deletions += res[i].deletions
             substitutions += res[i].substitutions
+        return {
+            'wer': (insertions + deletions + substitutions) / length,
+            'ins': insertions,
+            'del': deletions,
+            'sub': substitutions,
+            'len': length,
+        }
 
-        return (insertions + deletions + substitutions) / length, insertions, deletions, substitutions, length
+    def compute(self, targets_collection: List[Dict]):
+        preds = dim_zero_cat(self.preds)
+        preds_lengths = dim_zero_cat(self.preds_lengths)
+        preds_word_timestamps = dim_zero_cat(self.preds_word_timestamps)
+        preds_word_timestamps_lengths = dim_zero_cat(self.preds_word_timestamps_lengths)
+        utt_ids = dim_zero_cat(self.utt_ids)
+        spk_ids = dim_zero_cat(self.spk_ids)
+
+        gt_segments = []
+        for i in range(len(targets_collection)):
+            speakers = sorted(list(set(x['speaker'] for x in targets_collection[i].text_tokens)))
+            speaker_to_idx = {s: i for i, s in enumerate(speakers)}
+            for seg in targets_collection[i].text_tokens:
+                if seg['speaker'] not in speaker_to_idx:
+                    raise Exception(f"Speaker {seg['speaker']} not found in {speakers}")
+
+                gt_segments.append(SegLstSegment(session_id=targets_collection[i].id, 
+                                                 speaker=speaker_to_idx[seg['speaker']], 
+                                                 words=self.decoding.decode_tokens_to_str(seg['text']), 
+                                                 start_time=seg['start'],
+                                                 end_time=seg['start'] + seg['duration']))
+        
+        gt_segments = SegLST(segments=gt_segments)
+
+        # It might happen that when running validation using multiple GPUS, # of samples is not divisible by # of GPUS => some exapmles are duplicated (batch padding).
+        # Hence, we need to keep track of already processed pairs (utt_id, spk_id) to avoid double counting some errors.
+        already_processed_pairs = set()
+        pred_segments = []
+        current_start = 0
+        current_ts_start = 0
+        for i in range(len(preds_lengths)):
+            if (utt_ids[i].item(), spk_ids[i].item()) in already_processed_pairs:
+                continue
+            
+            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
+            current_transcript = self.decoding.decode_tokens_to_str(preds[current_start:current_start + preds_lengths[i]].detach().cpu())
+            words = current_transcript.split()
+            if not words:
+                pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
+                                                   speaker=spk_ids[i].item(), 
+                                                   words='', 
+                                                   start_time=0, 
+                                                   end_time=1))
+                continue
+
+            word_timestamps = preds_word_timestamps[current_ts_start:current_ts_start + preds_word_timestamps_lengths[i].detach().cpu()]
+            assert len(word_timestamps) == len(words), "Number of word timestamps must match number of words"
+
+            current_start += preds_lengths[i]
+            current_ts_start += preds_word_timestamps_lengths[i]
+
+            if self.output_per_word_timestamps:
+                current_segment_words = [(words[0], *word_timestamps[0])]
+                last_word_end = word_timestamps[0][1]
+                for j in range(len(words)):
+                    pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
+                                                       speaker=spk_ids[i].item(), 
+                                                       words=words[j], 
+                                                       start_time=word_timestamps[j][0] * self.embed_duration, 
+                                                       end_time=word_timestamps[j][1] * self.embed_duration))
+            else:
+                current_segment_words = [(words[0], *word_timestamps[0])]
+                last_word_end = word_timestamps[0][1]
+                for j in range(len(words)):
+                    if (word_timestamps[j][0] - last_word_end)*self.embed_duration > 0.5:
+                        pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
+                                                speaker=spk_ids[i].item(), 
+                                                words=' '.join([w[0] for w in current_segment_words]), 
+                                                start_time=current_segment_words[0][1] * self.embed_duration, 
+                                                end_time=current_segment_words[-1][2] * self.embed_duration))
+                        current_segment_words = [(words[j], *word_timestamps[j])]
+                        last_word_end = word_timestamps[j][1]
+                    else:
+                        current_segment_words.append((words[j], *word_timestamps[j]))
+                        last_word_end = word_timestamps[j][1]
+
+                if len(current_segment_words) > 0:
+                    pred_segments.append(SegLstSegment(session_id=utt_ids[i].item(), 
+                                                    speaker=spk_ids[i].item(), 
+                                                    words=' '.join([w[0] for w in current_segment_words]), 
+                                                    start_time=current_segment_words[0][1] * self.embed_duration, 
+                                                    end_time=current_segment_words[-1][2] * self.embed_duration))
+
+        res_cp = self._process_metric_res(meeteval.wer.cpwer(reference=gt_segments, hypothesis=pred_segments))
+        res_tcp = self._process_metric_res(meeteval.wer.tcpwer(reference=gt_segments, hypothesis=pred_segments, collar=5))
+        
+        return res_cp, res_tcp

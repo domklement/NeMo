@@ -15,7 +15,7 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     trainer.devices=-1 \
     trainer.accelerator="gpu" \
     trainer.strategy="ddp" \
-    trainer.max_epochs=1000 \
+    trainer.max_epochs=1200 \
     model.encoder.d_model=256 \
     model.encoder.n_heads=4 \
     model.encoder.n_layers=16 \
@@ -25,7 +25,7 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     trainer.log_every_n_steps=20 \
     trainer.check_val_every_n_epoch=4 \
     model.train_ds.batch_size=128 \
-    model.validation_ds.batch_size=512 \
+    model.validation_ds.batch_size=128 \
     exp_manager.resume_if_exists=True \
     exp_manager.resume_ignore_no_checkpoint=True \
     exp_manager.exp_dir="/home/jovyan/NeMo/nemo_experiments" \
@@ -33,7 +33,9 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     exp_manager.wandb_logger_kwargs.name="fastconformer_ctc_bpe_stno_nsf_test_v12" \
     exp_manager.wandb_logger_kwargs.project="nemo_tests" \
     exp_manager.checkpoint_callback_params.monitor="val/cp_wer" \
-    name="FastConformer-CTC-BPE-cpwer_scoring"
+    name="FastConformer-CTC-BPE-cpwer_scoring" \
+    +model.decoding.compute_timestamps=True \
+    +model.decoding.strategy=greedy
 
 # python examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
 #     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \

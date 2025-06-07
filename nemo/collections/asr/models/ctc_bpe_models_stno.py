@@ -86,6 +86,9 @@ class EncDecCTCModelBPESTNO(EncDecCTCSTNOModel, ASRBPEMixin):
 
         self.decoding = CTCBPEDecoding(self.cfg.decoding, tokenizer=self.tokenizer)
 
+        self.audio_downsampling_factor = int(self.cfg.sample_rate * self.cfg.preprocessor.window_stride * self.cfg.encoder.subsampling_factor)
+        self.embed_duration = self.audio_downsampling_factor / self.cfg.sample_rate # in seconds
+
         # Setup metric with decoding strategy
         self.wer = WER(
             decoding=self.decoding,
@@ -98,6 +101,7 @@ class EncDecCTCModelBPESTNO(EncDecCTCSTNOModel, ASRBPEMixin):
             decoding=self.decoding,
             dist_sync_on_step=False,
             log_prediction=self._cfg.get("log_prediction", False),
+            embed_duration=self.embed_duration,
         )
 
     def _setup_dataloader_from_config(self, config: Optional[Dict], val: bool = False):
