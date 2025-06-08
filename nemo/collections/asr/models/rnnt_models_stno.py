@@ -754,16 +754,16 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
                 'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
             }
 
-            if (sample_id + 1) % log_every_n_steps == 0:
-                self.wer.update(
-                    predictions=encoded,
-                    predictions_lengths=encoded_len,
-                    targets=transcript,
-                    targets_lengths=transcript_len,
-                )
-                _, scores, words = self.wer.compute()
-                self.wer.reset()
-                tensorboard_logs.update({'training_batch_wer': scores.float() / words})
+            # if (sample_id + 1) % log_every_n_steps == 0:
+            #     self.wer.update(
+            #         predictions=encoded,
+            #         predictions_lengths=encoded_len,
+            #         targets=transcript,
+            #         targets_lengths=transcript_len,
+            #     )
+            #     _, scores, words = self.wer.compute()
+            #     self.wer.reset()
+            #     tensorboard_logs.update({'training_batch_wer': scores.float() / words})
 
         else:
             # If experimental fused Joint-Loss-WER is used

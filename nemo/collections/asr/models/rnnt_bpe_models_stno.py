@@ -39,20 +39,23 @@ from nemo.utils import logging, model_utils
 class EncDecRNNTBPEModelSTNO(EncDecRNNTModelSTNO, ASRBPEMixin):
     """Base class for encoder decoder RNNT-based models with subword tokenization."""
 
-    def __init__(self, cfg: DictConfig, trainer: Trainer = None):
+    def __init__(self, cfg: DictConfig, trainer: Trainer = None, tokenizer=None):
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
 
         # Tokenizer is necessary for this model
-        if 'tokenizer' not in cfg:
+        if 'tokenizer' not in cfg and tokenizer is None:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
 
         if not isinstance(cfg, DictConfig):
             cfg = OmegaConf.create(cfg)
 
         # Setup the tokenizer
-        self._setup_tokenizer(cfg.tokenizer)
+        if tokenizer is None:
+            self._setup_tokenizer(cfg.tokenizer)
+        else:
+            self.tokenizer = tokenizer
 
         # Initialize a dummy vocabulary
         vocabulary = self.tokenizer.tokenizer.get_vocab()

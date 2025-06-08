@@ -67,6 +67,7 @@ from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 from nemo.utils.trainer_utils import resolve_trainer_cfg
+from nemo.collections.asr.models import ASRModel
 
 from pytorch_lightning.callbacks import Callback
 class EvalAtStartCallback(Callback):
@@ -80,9 +81,16 @@ def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
 
     trainer = pl.Trainer(**resolve_trainer_cfg(cfg.trainer))
-    # trainer.callbacks.append(EvalAtStartCallback())
-    exp_manager(trainer, cfg.get("exp_manager", None))
-    asr_model = EncDecRNNTBPEModelSTNO(cfg=cfg.model, trainer=trainer)
+    trainer.callbacks.append(EvalAtStartCallback())
+
+    pretrained_model = ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+    
+    # exp_manager(trainer, cfg.get("exp_manager", None))
+    asr_model = EncDecRNNTBPEModelSTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
+
+    missing, unexpected = asr_model.load_state_dict(pretrained_model.state_dict(), strict=False)
+    print(f"Missing keys: {missing}")
+    print(f"Unexpected keys: {unexpected}")
 
     # Initialize the weights of the model from another model, if provided via config
     asr_model.maybe_init_from_pretrained_checkpoint(cfg)
