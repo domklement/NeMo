@@ -13,7 +13,7 @@ def process_cut(cut):
         "audio_filepath": str(cut.recording.sources[0].source),
         "duration": float(cut.duration),
         "offset": float(cut.start),
-        "texts": []
+        "text": []
     }
     
     # Add supervision information
@@ -24,7 +24,7 @@ def process_cut(cut):
             "speaker": supervision.speaker,
             "text": supervision.text
         }
-        cut_dict["texts"].append(text_dict)
+        cut_dict["text"].append(text_dict)
 
     return cut_dict
 

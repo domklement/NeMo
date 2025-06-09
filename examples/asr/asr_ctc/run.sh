@@ -19,6 +19,8 @@ python ~/NeMo/examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
     model.encoder.n_layers=16 \
     model.encoder.conv_kernel_size=9 \
     model.optim.weight_decay=1e-3 \
+    +model.decoding.compute_timestamps=True \
+    +model.decoding.preserve_alignments=True \
     trainer.val_check_interval=500 \
     trainer.log_every_n_steps=20 \
     model.train_ds.batch_size=256 \

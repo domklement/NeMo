@@ -829,6 +829,8 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
         signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids = batch
 
+        # print('Signal shape', signal.shape)
+
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
             encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len)
@@ -1204,3 +1206,50 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
     @wer.setter
     def wer(self, wer):
         self._wer = wer
+
+    def setup_optimizer_param_groups(self):
+        if not hasattr(self, "parameters"):
+            self._optimizer_param_groups = None
+            return
+
+        known_groups = []
+        param_groups = []
+        
+        fddt_group = []
+        for n, p in self.named_parameters():
+            if 'fddt' in n:
+                fddt_group.append(p)
+        param_groups.append({
+            "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 100)
+        })
+
+        if "optim_param_groups" in self.cfg:
+            param_groups_cfg = self.cfg.optim_param_groups
+            for group, group_cfg in param_groups_cfg.items():
+                module = getattr(self, group, None)
+                if module is None:
+                    raise ValueError(f"{group} not found in model.")
+                elif hasattr(module, "parameters"):
+                    known_groups.append(group)
+                    new_group = {"params": list(module.parameters())}
+                    for k, v in group_cfg.items():
+                        new_group[k] = v
+                    param_groups.append(new_group)
+                else:
+                    raise ValueError(f"{group} does not have parameters.")
+
+            other_params = []
+            for n, p in self.named_parameters():
+                is_unknown = True
+                for group in known_groups:
+                    if n.startswith(group):
+                        is_unknown = False
+                if is_unknown:
+                    other_params.append(p)
+
+            if len(other_params):
+                param_groups = [{"params": other_params}] + param_groups
+        else:
+            param_groups = [{"params": list(self.parameters())}]
+
+        self._optimizer_param_groups = param_groups

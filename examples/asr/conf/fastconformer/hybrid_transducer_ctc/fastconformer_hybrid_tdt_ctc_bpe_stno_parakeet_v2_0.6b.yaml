@@ -15,6 +15,7 @@ model:
   compute_eval_loss: false # eval samples can be very long and exhaust memory. Disable computation of transducer loss during validation/testing with this flag.
   log_prediction: true # enables logging sample predictions in the output during training
   skip_nan_grad: false
+  fddt_lr_multiplier: 10
 
   model_defaults:
     enc_hidden: ${model.encoder.d_model}
@@ -117,7 +118,7 @@ model:
     att_context_style: regular # regular or chunked_limited
     xscaling: false # scales up the input embeddings by sqrt(d_model)
     untie_biases: true # unties the biases of the TransformerXL layers
-    pos_emb_max_len: 5000 # 400s
+    pos_emb_max_len: 45000 # 1hour at 12.5Hz
 
     # Convolution module's params
     conv_kernel_size: 9
