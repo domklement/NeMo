@@ -127,6 +127,12 @@ def temporary_directory():
         tmp_dir[0].cleanup()
 
 
+def get_world_size():
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+    return 1
+
+
 def webdataset_split_by_workers(src):
     """
     This is for latest webdataset>=0.2.6

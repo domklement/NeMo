@@ -81,11 +81,11 @@ def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
 
     trainer = pl.Trainer(**resolve_trainer_cfg(cfg.trainer))
-    trainer.callbacks.append(EvalAtStartCallback())
+    # trainer.callbacks.append(EvalAtStartCallback())
 
     pretrained_model = ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
     
-    # exp_manager(trainer, cfg.get("exp_manager", None))
+    exp_manager(trainer, cfg.get("exp_manager", None))
     asr_model = EncDecRNNTBPEModelSTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
 
     missing, unexpected = asr_model.load_state_dict(pretrained_model.state_dict(), strict=False)

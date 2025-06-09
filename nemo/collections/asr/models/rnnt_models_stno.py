@@ -48,6 +48,7 @@ from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.neural_types import AcousticEncodedRepresentation, AudioSignal, LengthsType, MaskType, NeuralType, SpectrogramType
 from nemo.utils import logging
+from nemo.utils.get_rank import is_global_rank_zero
 
 
 class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTranscriptionMixin):
@@ -937,13 +938,20 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
         # Case where we provide exactly 1 data loader
         if isinstance(self.validation_step_outputs[0], dict):
             output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
+
+            # if is_global_rank_zero():
             cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection)
             output_dict['log'].update({'val/cp_wer': cp_res['wer'], 'val/cp_ins': cp_res['ins'], 'val/cp_del': cp_res['del'], 'val/cp_sub': cp_res['sub'], 'val/cp_len': cp_res['len'],
-                                       'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
+                                    'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
             self.meeteval_mt_wer.reset()
 
             if output_dict is not None and 'log' in output_dict:
+                if is_global_rank_zero():
+                    print('output_dict', output_dict)
                 self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)
+
+            # if torch.distributed.is_available() and torch.distributed.is_initialized():
+            #     torch.distributed.barrier()
 
             self.validation_step_outputs.clear()  # free memory
             return output_dict

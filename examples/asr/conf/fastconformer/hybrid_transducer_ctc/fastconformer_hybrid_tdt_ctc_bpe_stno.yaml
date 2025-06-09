@@ -8,6 +8,7 @@
 # FastConformer-Transducer's architecture config, along with the optimal batch size and precision: NeMo/examples/asr/conf/fastconformer/fast-conformer_transducer_bpe.yaml
 
 name: "FastConformer-Hybrid-TDT-CTC-BPE-STNO"
+seed: 1234
 
 model:
   sample_rate: 16000
