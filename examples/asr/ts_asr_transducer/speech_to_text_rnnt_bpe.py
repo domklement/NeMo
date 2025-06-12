@@ -75,6 +75,10 @@ class EvalAtStartCallback(Callback):
         print("Evaluating at start...")
         trainer.validate(pl_module)
 
+# import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# import torch
+# torch.set_float32_matmul_precision('medium')
 
 @hydra_runner(config_path="../conf/fastconformer/hybrid_transducer_ctc", config_name="fastconformer_hybrid_tdt_ctc_bpe_stno")
 def main(cfg):
@@ -97,7 +101,9 @@ def main(cfg):
     # Initialize the weights of the model from another model, if provided via config
     asr_model.maybe_init_from_pretrained_checkpoint(cfg)
 
-    # trainer.validate(asr_model)
+    if cfg.get("evaluate_at_start", True):
+        trainer.validate(asr_model)
+
     trainer.fit(asr_model)
 
     if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:

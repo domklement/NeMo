@@ -301,7 +301,10 @@ class MeetevalMTWER(Metric):
         res_tcp = self._process_metric_res(meeteval.wer.tcpwer(reference=gt_seg_lst, hypothesis=pred_seg_lst, collar=5))
 
         res_both_all_ranks = [None] * get_world_size()
-        torch.distributed.all_gather_object(res_both_all_ranks, (res_cp, res_tcp))
+        if get_world_size() > 1:
+            torch.distributed.all_gather_object(res_both_all_ranks, (res_cp, res_tcp))
+        else:
+            res_both_all_ranks[0] = (res_cp, res_tcp)
 
         res_cp = self._reduce_res([res[0] for res in res_both_all_ranks])
         res_tcp = self._reduce_res([res[1] for res in res_both_all_ranks])

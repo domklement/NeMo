@@ -38,6 +38,7 @@ from nemo.collections.asr.parts.mixins import (
     TranscriptionReturnType,
 )
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
+from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecoding, RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
@@ -911,6 +912,16 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
             self.validation_step_outputs.append(metrics)
         return metrics
     
+    def on_train_epoch_start(self) -> None:
+        super().on_train_epoch_start()
+        torch.cuda.empty_cache()
+        # self.meeteval_mt_wer.reset()
+    
+    def on_validation_epoch_start(self) -> None:
+        super().on_validation_epoch_start()
+        # WithOptionalCudaGraphs.disable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
+        torch.cuda.empty_cache()
+    
     def on_validation_epoch_end(self, sync_metrics: bool = False) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
         """
         Default DataLoader for Validation set which automatically supports multiple data loaders
@@ -932,6 +943,8 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
             A dictionary containing the union of all items from individual data_loaders,
             along with merged logs from all data loaders.
         """
+        WithOptionalCudaGraphs.disable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
+
         print("on_validation_epoch_end")
         # Case where we dont provide data loaders
         if self.validation_step_outputs is not None and len(self.validation_step_outputs) == 0:
@@ -946,6 +959,7 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
             output_dict['log'].update({'val/cp_wer': cp_res['wer'], 'val/cp_ins': cp_res['ins'], 'val/cp_del': cp_res['del'], 'val/cp_sub': cp_res['sub'], 'val/cp_len': cp_res['len'],
                                     'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
             self.meeteval_mt_wer.reset()
+            # output_dict['log'].update({'val/cp_wer': 1.0})
 
             if output_dict is not None and 'log' in output_dict:
                 if is_global_rank_zero():
