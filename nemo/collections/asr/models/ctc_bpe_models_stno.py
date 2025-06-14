@@ -40,7 +40,7 @@ __all__ = ['EncDecCTCModelBPESTNO']
 class EncDecCTCModelBPESTNO(EncDecCTCSTNOModel, ASRBPEMixin):
     """Encoder decoder CTC-based models with Byte Pair Encoding."""
 
-    def __init__(self, cfg: DictConfig, trainer=None):
+    def __init__(self, cfg: DictConfig, trainer=None, tokenizer=None):
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
@@ -49,7 +49,11 @@ class EncDecCTCModelBPESTNO(EncDecCTCSTNOModel, ASRBPEMixin):
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
 
         # Setup the tokenizer
-        self._setup_tokenizer(cfg.tokenizer)
+        if tokenizer is None:
+            self._setup_tokenizer(cfg.tokenizer)
+        else:
+            self.tokenizer = tokenizer
+            self.tokenizer_type = 'bpe'
 
         # Initialize a dummy vocabulary
         vocabulary = self.tokenizer.tokenizer.get_vocab()

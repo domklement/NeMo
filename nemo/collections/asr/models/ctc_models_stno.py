@@ -599,16 +599,16 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
             }
         )
 
-        if (batch_nb + 1) % log_every_n_steps == 0:
-            self.wer.update(
-                predictions=log_probs,
-                targets=transcript,
-                targets_lengths=transcript_len,
-                predictions_lengths=encoded_len,
-            )
-            wer, _, _ = self.wer.compute()
-            self.wer.reset()
-            tensorboard_logs.update({'training_batch_wer': wer})
+        # if (batch_nb + 1) % log_every_n_steps == 0:
+            # self.wer.update(
+            #     predictions=log_probs,
+            #     targets=transcript,
+            #     targets_lengths=transcript_len,
+            #     predictions_lengths=encoded_len,
+            # )
+            # wer, _, _ = self.wer.compute()
+            # self.wer.reset()
+            # tensorboard_logs.update({'training_batch_wer': wer})
 
         return {'loss': loss_value, 'log': tensorboard_logs}
 
