@@ -33,7 +33,7 @@ model:
     num_workers: 8
     prefetch_factor: 2
     pin_memory: true
-    max_duration: 40 # it is set for LibriSpeech, you may need to update it for your dataset
+    max_duration: 100 # it is set for LibriSpeech, you may need to update it for your dataset
     min_duration: 0.1
     # tarred datasets
     is_tarred: false
