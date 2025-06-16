@@ -1,4 +1,4 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,15 +32,14 @@ python <NEMO_ROOT>/scripts/tokenizers/process_asr_text_tokenizer.py \
 
 # Training the model
 ```sh
-python speech_to_text_rnnt_bpe.py \
+python speech_to_text_hybrid_rnnt_ctc_bpe.py \
     # (Optional: --config-path=<path to dir of configs> --config-name=<name of config without .yaml>) \
     model.train_ds.manifest_filepath=<path to train manifest> \
     model.validation_ds.manifest_filepath=<path to val/test manifest> \
     model.tokenizer.dir=<path to directory of tokenizer (not full path to the vocab file!)> \
     model.tokenizer.type=<either bpe or wpe> \
+    model.aux_ctc.ctc_loss_weight=0.3 \
     trainer.devices=-1 \
-    trainer.accelerator="gpu" \
-    trainer.strategy="ddp" \
     trainer.max_epochs=100 \
     model.optim.name="adamw" \
     model.optim.lr=0.001 \
@@ -62,36 +61,28 @@ https://docs.nvidia.com/deeplearning/nemo/user-guide/docs/en/main/asr/configs.ht
 import lightning.pytorch as pl
 from omegaconf import OmegaConf
 
-from nemo.collections.asr.models import EncDecRNNTBPEModelSTNO
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModelSTNO
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 from nemo.utils.trainer_utils import resolve_trainer_cfg
 from nemo.collections.asr.models import ASRModel
 
-from pytorch_lightning.callbacks import Callback
-class EvalAtStartCallback(Callback):
-    def on_train_start(self, trainer, pl_module):
-        print("Evaluating at start...")
-        trainer.validate(pl_module)
 
-# import os
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-# import torch
-# torch.set_float32_matmul_precision('medium')
-
-@hydra_runner(config_path="../conf/fastconformer/hybrid_transducer_ctc", config_name="fastconformer_hybrid_tdt_ctc_bpe_stno")
+@hydra_runner(
+    config_path="../conf/conformer/hybrid_transducer_ctc/", config_name="conformer_hybrid_transducer_ctc_bpe"
+)
 def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
 
     trainer = pl.Trainer(**resolve_trainer_cfg(cfg.trainer))
-    # trainer.callbacks.append(EvalAtStartCallback())
+
     init_from_pretrained = cfg.get("init_from_pretrained", None)
     if init_from_pretrained is not None:
         pretrained_model = ASRModel.from_pretrained(model_name=init_from_pretrained)
-    
+
     exp_manager(trainer, cfg.get("exp_manager", None))
-    asr_model = EncDecRNNTBPEModelSTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
+    asr_model = EncDecHybridRNNTCTCBPEModelSTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
 
     if init_from_pretrained is not None:
         missing, unexpected = asr_model.load_state_dict(pretrained_model.state_dict(), strict=False)

@@ -24,7 +24,9 @@ from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
 from nemo.collections.asr.models.ctc_bpe_models_stno import EncDecCTCModelBPESTNO
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel
+from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_stno import EncDecHybridRNNTCTCBPEModelSTNO
 from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel
+from nemo.collections.asr.models.hybrid_rnnt_ctc_models_stno import EncDecHybridRNNTCTCModelSTNO
 from nemo.collections.asr.models.k2_sequence_models import (
     EncDecK2RnntSeqModel,
     EncDecK2RnntSeqModelBPE,

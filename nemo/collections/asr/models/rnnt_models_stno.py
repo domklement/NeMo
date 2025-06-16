@@ -724,6 +724,7 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
         else:
             encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len)
         del signal
+        del stno_mask
 
         # During training, loss must be computed, so decoder forward is necessary
         decoder, target_length, states = self.decoder(targets=transcript, target_length=transcript_len)
@@ -954,8 +955,12 @@ class EncDecRNNTModelSTNO(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTr
         if isinstance(self.validation_step_outputs[0], dict):
             output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
 
-            # if is_global_rank_zero():
-            cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection)
+            save_stm_path = f'{self.trainer.log_dir}/preds_{self.current_epoch}_{self.trainer.global_step}'
+            logging.info(f"Saving predictions to {save_stm_path}")
+            if not os.path.exists(save_stm_path):
+                os.makedirs(save_stm_path, exist_ok=True)
+
+            cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection, save_stm_path=save_stm_path)
             output_dict['log'].update({'val/cp_wer': cp_res['wer'], 'val/cp_ins': cp_res['ins'], 'val/cp_del': cp_res['del'], 'val/cp_sub': cp_res['sub'], 'val/cp_len': cp_res['len'],
                                     'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
             self.meeteval_mt_wer.reset()

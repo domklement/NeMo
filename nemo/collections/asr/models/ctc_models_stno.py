@@ -717,7 +717,12 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
         # Case where we provide exactly 1 data loader
         if isinstance(self.validation_step_outputs[0], dict):
             output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
-            cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection)
+
+            save_stm_path = f'{self.trainer.log_dir}/preds_{self.current_epoch}_{self.trainer.estimated_stepping_batches}'
+            if not os.path.exists(save_stm_path):
+                os.makedirs(save_stm_path, exist_ok=True)
+
+            cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection, save_stm_path=save_stm_path)
             output_dict['log'].update({'val/cp_wer': cp_res['wer'], 'val/cp_ins': cp_res['ins'], 'val/cp_del': cp_res['del'], 'val/cp_sub': cp_res['sub'], 'val/cp_len': cp_res['len'],
                                        'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
             self.meeteval_mt_wer.reset()

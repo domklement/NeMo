@@ -29,6 +29,7 @@ from nemo.collections.asr.parts.submodules.rnnt_decoding import AbstractRNNTDeco
 from nemo.utils import logging
 from nemo.utils.get_rank import is_global_rank_zero, get_rank
 from nemo.utils.distributed import get_world_size
+from nemo.collections.asr.data.text_norm import get_text_norm
 
 __all__ = ['MeetevalMTWER']
 
@@ -57,6 +58,9 @@ class MeetevalMTWER(Metric):
         self.batch_dim_index = batch_dim_index
         self.embed_duration = embed_duration
         self.output_per_word_timestamps = output_per_word_timestamps
+
+        self.text_norm = get_text_norm('whisper_nsf')
+        # self.text_norm = lambda x: x
 
         self.decode = None
         if isinstance(self.decoding, AbstractRNNTDecoding):
@@ -183,7 +187,7 @@ class MeetevalMTWER(Metric):
                 res[k] += res_rank[k]
         return res
 
-    def compute(self, targets_collection: List[Dict]):
+    def compute(self, targets_collection: List[Dict], save_stm_path: Optional[str] = None):
         preds = dim_zero_cat(self.preds)
         preds_lengths = dim_zero_cat(self.preds_lengths)
         preds_word_timestamps = dim_zero_cat(self.preds_word_timestamps)
@@ -204,7 +208,7 @@ class MeetevalMTWER(Metric):
 
                 gt_segments[targets_collection[i].id].append(SegLstSegment(session_id=targets_collection[i].id, 
                                                  speaker=speaker_to_idx[seg['speaker']], 
-                                                 words=self.decoding.decode_tokens_to_str(seg['text']), 
+                                                 words=self.text_norm(self.decoding.decode_tokens_to_str(seg['text'])), 
                                                  start_time=seg['start'],
                                                  end_time=seg['start'] + seg['duration']))
         gt_segment_ids = sorted(list(gt_segments.keys()))
@@ -260,7 +264,7 @@ class MeetevalMTWER(Metric):
                 for j in range(len(words)):
                     pred_segments[utt_ids[i].item()].append(SegLstSegment(session_id=utt_ids[i].item(), 
                                                        speaker=spk_ids[i].item(), 
-                                                       words=words[j], 
+                                                       words=self.text_norm(words[j]), 
                                                        start_time=word_timestamps[j][0] * self.embed_duration, 
                                                        end_time=word_timestamps[j][1] * self.embed_duration))
             else:
@@ -270,7 +274,7 @@ class MeetevalMTWER(Metric):
                     if (word_timestamps[j][0] - last_word_end)*self.embed_duration > 0.5:
                         pred_segments[utt_ids[i].item()].append(SegLstSegment(session_id=utt_ids[i].item(), 
                                                 speaker=spk_ids[i].item(), 
-                                                words=' '.join([w[0] for w in current_segment_words]), 
+                                                words=self.text_norm(' '.join([w[0] for w in current_segment_words])), 
                                                 start_time=current_segment_words[0][1] * self.embed_duration, 
                                                 end_time=current_segment_words[-1][2] * self.embed_duration))
                         current_segment_words = [(words[j], *word_timestamps[j])]
@@ -282,7 +286,7 @@ class MeetevalMTWER(Metric):
                 if len(current_segment_words) > 0:
                     pred_segments[utt_ids[i].item()].append(SegLstSegment(session_id=utt_ids[i].item(), 
                                                     speaker=spk_ids[i].item(), 
-                                                    words=' '.join([w[0] for w in current_segment_words]), 
+                                                    words=self.text_norm(' '.join([w[0] for w in current_segment_words])), 
                                                     start_time=current_segment_words[0][1] * self.embed_duration, 
                                                     end_time=current_segment_words[-1][2] * self.embed_duration))
 
@@ -308,5 +312,11 @@ class MeetevalMTWER(Metric):
 
         res_cp = self._reduce_res([res[0] for res in res_both_all_ranks])
         res_tcp = self._reduce_res([res[1] for res in res_both_all_ranks])
+
+        if save_stm_path is not None and is_global_rank_zero():
+            hyp_seglist = SegLST(segments=[seg for uid in pred_segment_ids for seg in pred_segments[uid]])
+            gt_seglist = SegLST(segments=[seg for uid in gt_segment_ids for seg in gt_segments[uid]])
+            meeteval.io.dump(gt_seglist, f'{save_stm_path}/ref.stm')
+            meeteval.io.dump(hyp_seglist, f'{save_stm_path}/hyp.stm')
 
         return res_cp, res_tcp
