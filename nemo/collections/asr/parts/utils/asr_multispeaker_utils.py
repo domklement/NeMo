@@ -15,9 +15,13 @@
 import math
 from typing import Optional, Union
 
+import numpy as np
 import torch
 from lhotse import SupervisionSet
 from lhotse.cut import MixedCut, MonoCut
+from scipy.optimize import linear_sum_assignment
+from torch.nn.functional import logsigmoid
+
 
 
 def find_first_nonzero(mat: torch.Tensor, max_cap_val=-1, thres: float = 0.5) -> torch.Tensor:
@@ -174,6 +178,26 @@ def get_pil_targets(labels: torch.Tensor, preds: torch.Tensor, speaker_permutati
     # Reconstruct labels based on the best permutation for each batch
     max_score_permed_labels = reconstruct_labels(labels, batch_perm_inds)  # (batch_size, num_speakers, num_classes)
     return max_score_permed_labels  # (batch_size, num_speakers, num_classes)
+
+
+def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor) -> torch.Tensor:
+    preds_t = preds.detach().transpose(1, 2)
+    cost_mxs = -logsigmoid(preds_t).bmm(labels) - logsigmoid(-preds_t).bmm(1-labels)
+
+    max_n_speakers = max(n_speakers)
+    batch_perm_inds = []
+
+    for i, cost_mx in enumerate(cost_mxs.cpu().numpy()):
+        if max_n_speakers > n_speakers[i]:
+            max_value = np.absolute(cost_mx).sum()
+            cost_mx[-(max_n_speakers-n_speakers[i]):] = max_value
+            cost_mx[:, -(max_n_speakers-n_speakers[i]):] = max_value
+        pred_alig, ref_alig = linear_sum_assignment(cost_mx)
+        assert (np.all(pred_alig == np.arange(preds.shape[-1])))
+        batch_perm_inds.append(ref_alig)
+
+    batch_perm_inds = torch.tensor(batch_perm_inds).to(preds.device)
+    return reconstruct_labels(labels, batch_perm_inds)
 
 
 def find_segments_from_rttm(

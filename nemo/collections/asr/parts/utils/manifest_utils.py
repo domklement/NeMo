@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Dict, List, Union
 
 import librosa
+import sox
 import numpy as np
+from tqdm import tqdm
 
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
@@ -419,7 +421,7 @@ def create_manifest(
     ctm_pathdict = get_path_dict(ctm_path, uniqids, len_wavs)
 
     lines = []
-    for uid in uniqids:
+    for uid in tqdm(uniqids):
         wav, text, rttm, uem, ctm = (
             wav_pathdict[uid],
             text_pathdict[uid],
@@ -450,8 +452,9 @@ def create_manifest(
 
         duration = None
         if add_duration:
-            y, sr = librosa.load(audio_line, sr=None)
-            duration = librosa.get_duration(y=y, sr=sr)
+            # y, sr = librosa.load(audio_line, sr=None)
+            # duration = librosa.get_duration(y=y, sr=sr)
+            duration = sox.file_info.duration(audio_line)
         meta = [
             {
                 "audio_filepath": audio_line,

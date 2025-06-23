@@ -30,6 +30,7 @@ from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLay
 from nemo.collections.asr.parts.submodules.multi_head_attention import (
     LocalAttRelPositionalEncoding,
     MultiHeadAttention,
+    NoPositionalEncoding,
     PositionalEncoding,
     RelPositionalEncoding,
     RelPositionMultiHeadAttention,
@@ -443,6 +444,14 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             pos_bias_v = None
             self.pos_enc = PositionalEncoding(
                 d_model=d_model, dropout_rate=dropout_pre_encoder, max_len=pos_emb_max_len, xscale=self.xscale
+            )
+        elif self_attention_model == "no_pos_emb":
+            pos_bias_u = None
+            pos_bias_v = None
+            self.pos_enc = NoPositionalEncoding(
+                d_model=d_model,
+                dropout_rate=dropout_pre_encoder,
+                max_len=pos_emb_max_len,
             )
         else:
             raise ValueError(f"Not valid self_attention_model: '{self_attention_model}'!")

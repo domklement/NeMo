@@ -12,7 +12,7 @@ python /home/jovyan/NeMo/examples/asr/ts_asr_transducer/speech_to_text_rnnt_bpe.
     --config-path=/home/jovyan/NeMo/examples/asr/conf/fastconformer/hybrid_transducer_ctc \
     --config-name=fastconformer_hybrid_tdt_ctc_bpe_stno_parakeet_v2_0.6b.yaml \
     model.train_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/ami_nsf_train_sc_cutset_30s.jsonl \
-    model.validation_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/notsofar_eval_sc_cutset.jsonl \
+    model.validation_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/ami-sdm_test_sc_cutset.jsonl \
     model.tokenizer.dir=/tmp/tokenizers/ls960/tokenizer_spe_bpe_v500 \
     model.tokenizer.type=bpe \
     trainer.devices=-1 \
@@ -39,4 +39,6 @@ python /home/jovyan/NeMo/examples/asr/ts_asr_transducer/speech_to_text_rnnt_bpe.
     +init_from_pretrained=nvidia/parakeet-tdt-0.6b-v2 \
     name=decoding \
     +model.decoding.compute_timestamps=True \
-    +model.decoding.preserve_alignments=False
+    +model.decoding.preserve_alignments=False \
+    model.encoder.att_context_size=[128,128] \
+    model.encoder.att_context_style=regular \

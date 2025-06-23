@@ -1,0 +1,66 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import lightning.pytorch as pl
+from omegaconf import OmegaConf
+from lightning.pytorch.loggers import WandbLogger
+from pytorch_lightning import seed_everything
+
+from nemo.collections.asr.models.eend_diar_models import EENDEncLabelModel
+from nemo.core.config import hydra_runner
+from nemo.utils import logging
+from nemo.utils.exp_manager import exp_manager
+
+"""
+Example training session (single node training)
+
+python ./sortformer_diar_train.py --config-path='../conf/neural_diarizer' \
+    --config-name='sortformer_diarizer_hybrid_loss_4spk-v1.yaml' \
+    trainer.devices=1 \
+    model.train_ds.manifest_filepath="<train_manifest_path>" \
+    model.validation_ds.manifest_filepath="<dev_manifest_path>" \
+    exp_manager.name='sample_train' \
+    exp_manager.exp_dir='./sortformer_diar_train'
+"""
+
+seed_everything(42)
+
+
+@hydra_runner(config_path="../conf/neural_diarizer", config_name="sortformer_diarizer_hybrid_loss_4spk-v1.yaml")
+def main(cfg):
+    """Main function for training the sortformer diarizer model."""
+    logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
+    trainer = pl.Trainer(**cfg.trainer)
+    exp_manager(trainer, cfg.get("exp_manager", None))
+    eend_model = EENDEncLabelModel(cfg=cfg.model, trainer=trainer)
+    eend_model.maybe_init_from_pretrained_checkpoint(cfg)
+
+    if cfg.get('init_from_nest', False):
+        from nemo.collections.asr.models import EncDecDenoiseMaskedTokenPredModel
+        nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0")
+        print('Loading NEST state dict:', eend_model.load_state_dict(nest_model.state_dict(), strict=False))
+
+    if isinstance(trainer.logger, WandbLogger):
+        trainer.logger.watch(eend_model, log="all", log_freq=500, log_graph=False)
+
+    # trainer.validate(eend_model)
+    trainer.fit(eend_model)
+
+    if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:
+        if eend_model.prepare_test(trainer):
+            trainer.test(eend_model)
+
+
+if __name__ == '__main__':
+    main()

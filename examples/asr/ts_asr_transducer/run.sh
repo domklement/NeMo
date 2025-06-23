@@ -185,7 +185,7 @@ python /home/jovyan/NeMo/examples/asr/ts_asr_transducer/speech_to_text_rnnt_bpe.
     trainer.log_every_n_steps=10 \
     model.train_ds.batch_size=16 \
     model.optim.sched.warmup_steps=2000 \
-    model.optim.lr=1.0 \
+    model.optim.lr=2.0 \
     trainer.accumulate_grad_batches=4 \
     model.validation_ds.batch_size=1 \
     exp_manager.resume_if_exists=True \
@@ -193,10 +193,10 @@ python /home/jovyan/NeMo/examples/asr/ts_asr_transducer/speech_to_text_rnnt_bpe.
     exp_manager.exp_dir=/tmp/nemo_experiments \
     exp_manager.checkpoint_callback_params.monitor=val/cp_wer \
     exp_manager.create_wandb_logger=True \
-    exp_manager.wandb_logger_kwargs.name=parakeet_110m_tdtonly_fddt_lr_mul_100_lr1.0_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+    exp_manager.wandb_logger_kwargs.name=parakeet_110m_tdtonly_fddt_lr_mul_100_lr2.0_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
     exp_manager.wandb_logger_kwargs.project=dk_nemo_tests \
     +init_from_pretrained=nvidia/parakeet-tdt_ctc-110m \
-    name=parakeet_110m_tdtonly_fddt_lr_mul_100_lr1.0_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+    name=parakeet_110m_tdtonly_fddt_lr_mul_100_lr2.0_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
     +model.decoding.compute_timestamps=True \
     +model.decoding.preserve_alignments=True
 
