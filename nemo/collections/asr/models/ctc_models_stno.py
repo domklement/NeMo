@@ -910,120 +910,52 @@ class EncDecCTCSTNOModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterC
         temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config))
         return temporary_datalayer
 
-    @classmethod
-    def list_available_models(cls) -> List[PretrainedModelInfo]:
-        """
-        This method returns a list of pre-trained model which can be instantiated directly from NVIDIA's NGC cloud.
+    def setup_optimizer_param_groups(self):
+        if not hasattr(self, "parameters"):
+            self._optimizer_param_groups = None
+            return
 
-        Returns:
-            List of available pre-trained models.
-        """
-        results = []
+        known_groups = []
+        param_groups = []
+        
+        fddt_group = []
+        for n, p in self.named_parameters():
+            if 'fddt' in n:
+                fddt_group.append(p)
+        param_groups.append({
+            "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 100)
+        })
 
-        model = PretrainedModelInfo(
-            pretrained_model_name="QuartzNet15x5Base-En",
-            description="QuartzNet15x5 model trained on six datasets: LibriSpeech, Mozilla Common Voice \
-                (validated clips from en_1488h_2019-12-10), WSJ, Fisher, Switchboard, and NSC Singapore English. \
-                    It was trained with Apex/Amp optimization level O1 for 600 epochs. The model achieves a WER of \
-                    3.79% on LibriSpeech dev-clean, and a WER of 10.05% on dev-other. Please visit \
-                        https://ngc.nvidia.com/catalog/models/nvidia:nemospeechmodels for further details.",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemospeechmodels/versions/1.0.0a5/files/QuartzNet15x5Base-En.nemo",
-        )
-        results.append(model)
+        if "optim_param_groups" in self.cfg:
+            param_groups_cfg = self.cfg.optim_param_groups
+            for group, group_cfg in param_groups_cfg.items():
+                module = getattr(self, group, None)
+                if module is None:
+                    raise ValueError(f"{group} not found in model.")
+                elif hasattr(module, "parameters"):
+                    known_groups.append(group)
+                    new_group = {"params": list(module.parameters())}
+                    for k, v in group_cfg.items():
+                        new_group[k] = v
+                    param_groups.append(new_group)
+                else:
+                    raise ValueError(f"{group} does not have parameters.")
 
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_quartznet15x5/versions/1.0.0rc1/files/stt_en_quartznet15x5.nemo",
-        )
-        results.append(model)
+            other_params = []
+            for n, p in self.named_parameters():
+                is_unknown = True
+                for group in known_groups:
+                    if n.startswith(group):
+                        is_unknown = False
+                if is_unknown:
+                    other_params.append(p)
 
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_jasper10x5dr",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_jasper10x5dr",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_jasper10x5dr/versions/1.0.0rc1/files/stt_en_jasper10x5dr.nemo",
-        )
-        results.append(model)
+            if len(other_params):
+                param_groups = [{"params": other_params}] + param_groups
+        else:
+            param_groups = [{"params": list(self.parameters())}]
 
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ca_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ca_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ca_quartznet15x5/versions/1.0.0rc1/files/stt_ca_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_it_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_it_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_it_quartznet15x5/versions/1.0.0rc1/files/stt_it_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_fr_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_quartznet15x5/versions/1.0.0rc1/files/stt_fr_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_es_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_es_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_es_quartznet15x5/versions/1.0.0rc1/files/stt_es_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_quartznet15x5/versions/1.0.0rc1/files/stt_de_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_pl_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_pl_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_pl_quartznet15x5/versions/1.0.0rc1/files/stt_pl_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ru_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ru_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ru_quartznet15x5/versions/1.0.0rc1/files/stt_ru_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_512",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_512",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_512/versions/1.0.0rc1/files/stt_zh_citrinet_512.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_1024_gamma_0_25/versions/1.0.0/files/stt_zh_citrinet_1024_gamma_0_25.nemo",
-        )
-
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_1024_gamma_0_25/versions/1.0.0/files/stt_zh_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="asr_talknet_aligner",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:asr_talknet_aligner",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/asr_talknet_aligner/versions/1.0.0rc1/files/qn5x5_libri_tts_phonemes.nemo",
-        )
-        results.append(model)
-
-        return results
+        self._optimizer_param_groups = param_groups
 
     @property
     def adapter_module_names(self) -> List[str]:

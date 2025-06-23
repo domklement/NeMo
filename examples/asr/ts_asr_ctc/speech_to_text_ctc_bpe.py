@@ -95,7 +95,11 @@ def main(cfg):
     asr_model = EncDecCTCModelBPESTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
 
     if init_from_pretrained is not None:
-        missing, unexpected = asr_model.load_state_dict(pretrained_model.state_dict(), strict=False)
+        sd = pretrained_model.state_dict()
+        if 'ctc_decoder.decoder_layers.0.weight' in sd:
+            sd['decoder.decoder_layers.0.weight'] = sd.pop('ctc_decoder.decoder_layers.0.weight')
+            sd['decoder.decoder_layers.0.bias'] = sd.pop('ctc_decoder.decoder_layers.0.bias')
+        missing, unexpected = asr_model.load_state_dict(sd, strict=False)
         print(f"Missing keys: {missing}")
         print(f"Unexpected keys: {unexpected}")
 

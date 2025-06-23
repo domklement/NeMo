@@ -176,7 +176,7 @@ class MeetevalMTWER(Metric):
             output['ins'] += res[i].insertions
             output['del'] += res[i].deletions
             output['sub'] += res[i].substitutions
-        output['wer'] = (output['sub'] + output['ins'] + output['del']) / output['len']
+        # output['wer'] = (output['sub'] + output['ins'] + output['del']) / output['len']
         return output
 
     @staticmethod
@@ -311,7 +311,10 @@ class MeetevalMTWER(Metric):
             res_both_all_ranks[0] = (res_cp, res_tcp)
 
         res_cp = self._reduce_res([res[0] for res in res_both_all_ranks])
+        res_cp['wer'] = (res_cp['sub'] + res_cp['ins'] + res_cp['del']) / res_cp['len']
+
         res_tcp = self._reduce_res([res[1] for res in res_both_all_ranks])
+        res_tcp['wer'] = (res_tcp['sub'] + res_tcp['ins'] + res_tcp['del']) / res_tcp['len']
 
         if save_stm_path is not None and is_global_rank_zero():
             hyp_seglist = SegLST(segments=[seg for uid in pred_segment_ids for seg in pred_segments[uid]])
