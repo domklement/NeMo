@@ -1414,6 +1414,8 @@ class _AudioToSpeechE2ESpkDiarRandomChunkDataset(Dataset):
             "audio_length": NeuralType(('B'), LengthsType()),
             "targets": NeuralType(('B', 'T', 'C'), ProbsType()),
             "target_len": NeuralType(('B'), LengthsType()),
+            "uniq_ids": NeuralType(('B'), LengthsType()),
+            "offsets": NeuralType(('B'), LengthsType()),
         }
 
         return output_types
@@ -1441,6 +1443,7 @@ class _AudioToSpeechE2ESpkDiarRandomChunkDataset(Dataset):
             manifests_files=manifest_filepath.split(','),
             round_digits=round_digits,
         )
+
         self.featurizer = featurizer
         self.round_digits = round_digits
         self.feat_per_sec = int(1 / window_stride)
@@ -1627,7 +1630,7 @@ class _AudioToSpeechE2ESpkDiarRandomChunkDataset(Dataset):
         targets = self.parse_rttm_for_targets_and_lens(
             rttm_file=sample.rttm_file, offset=offset, duration=session_len_sec, target_len=target_len
         )
-        return audio_signal, audio_signal_length, targets, target_len
+        return audio_signal, audio_signal_length, targets, target_len, sample.uniq_id, torch.tensor(offset), sample.rttm_file
 
 
 def _eesd_train_collate_fn(self, batch):
@@ -1652,17 +1655,19 @@ def _eesd_train_collate_fn(self, batch):
             reshaping inputs to the EESD model.
     """
     packed_batch = list(zip(*batch))
-    audio_signal, feature_length, targets, target_len = packed_batch
+    audio_signal, feature_length, targets, target_len, uniq_ids, offsets, rttm_files = packed_batch
     audio_signal_list, feature_length_list = [], []
     target_len_list, targets_list = [], []
-
+    uniq_ids_list = []
+    rttm_files_list = []
+    offsets_list = []
     max_raw_feat_len = max([x.shape[0] for x in audio_signal])
     max_target_len = max([x.shape[0] for x in targets])
     if max([len(feat.shape) for feat in audio_signal]) > 1:
         max_ch = max([feat.shape[1] for feat in audio_signal])
     else:
         max_ch = 1
-    for feat, feat_len, tgt, segment_ct in batch:
+    for feat, feat_len, tgt, segment_ct, uniq_id, offset, rttm_file in batch:
         seq_len = tgt.shape[0]
         if len(feat.shape) > 1:
             pad_feat = (0, 0, 0, max_raw_feat_len - feat.shape[0])
@@ -1681,11 +1686,15 @@ def _eesd_train_collate_fn(self, batch):
         feature_length_list.append(feat_len.clone().detach())
         target_len_list.append(segment_ct.clone().detach())
         targets_list.append(padded_tgt)
+        uniq_ids_list.append(uniq_id)
+        offsets_list.append(offset)
+        rttm_files_list.append(rttm_file)
         audio_signal = torch.stack(audio_signal_list)
     feature_length = torch.stack(feature_length_list)
     target_lens = torch.stack(target_len_list).squeeze(1)
     targets = torch.stack(targets_list)
-    return audio_signal, feature_length, targets, target_lens
+    offsets = torch.stack(offsets_list)
+    return audio_signal, feature_length, targets, target_lens, uniq_ids, offsets, rttm_files_list
 
 
 class AudioToSpeechE2ESpkDiarRandomChunkDataset(_AudioToSpeechE2ESpkDiarRandomChunkDataset):

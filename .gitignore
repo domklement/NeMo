@@ -179,6 +179,7 @@ examples/neural_graphs/*.yml
 
 .hydra/
 nemo_experiments/
+jupyters/data/*
 
 slurm*.out
 

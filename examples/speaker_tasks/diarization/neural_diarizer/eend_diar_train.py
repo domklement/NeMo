@@ -44,15 +44,19 @@ def main(cfg):
     trainer = pl.Trainer(**cfg.trainer)
     exp_manager(trainer, cfg.get("exp_manager", None))
     eend_model = EENDEncLabelModel(cfg=cfg.model, trainer=trainer)
-    eend_model.maybe_init_from_pretrained_checkpoint(cfg)
 
     if cfg.get('init_from_nest', False):
         from nemo.collections.asr.models import EncDecDenoiseMaskedTokenPredModel
         nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0")
         print('Loading NEST state dict:', eend_model.load_state_dict(nest_model.state_dict(), strict=False))
 
+    eend_model.maybe_init_from_pretrained_checkpoint(cfg)
+
     if isinstance(trainer.logger, WandbLogger):
         trainer.logger.watch(eend_model, log="all", log_freq=500, log_graph=False)
+
+    if cfg.get('evaluate_at_start', False):
+        trainer.validate(eend_model)
 
     # trainer.validate(eend_model)
     trainer.fit(eend_model)

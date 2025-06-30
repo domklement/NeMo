@@ -33,6 +33,7 @@ from tqdm import tqdm
 from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechE2ESpkDiarRandomChunkDataset
 from nemo.collections.asr.data.audio_to_diar_label_lhotse import LhotseAudioToSpeechE2ESpkDiarDataset
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
+from nemo.collections.asr.metrics.meeteval_mt_der import MeetevalDER
 from nemo.collections.asr.models.asr_model import ExportableEncDecModel
 from nemo.collections.asr.parts.mixins.diarization import DiarizeConfig, SpkDiarizationMixin
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
@@ -172,6 +173,9 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
+
+        self._der_train = MeetevalDER()
+        self._der_valid = MeetevalDER()
 
         self._accuracy_test_ats = MultiBinaryAccuracy()
         self._accuracy_train_ats = MultiBinaryAccuracy()
@@ -866,7 +870,7 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         Returns:
             (dict): A dictionary containing the 'loss' key with the calculated loss value.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
 
         preds = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
@@ -945,13 +949,14 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         Returns:
             dict: A dictionary containing various validation metrics for this batch.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
         preds = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
         )
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens)
+            self._der_valid.update(preds, targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
         if isinstance(self.trainer.val_dataloaders, list) and len(self.trainer.val_dataloaders) > 1:
             self.validation_step_outputs[dataloader_idx].append(val_metrics)
         else:
@@ -962,6 +967,7 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         if not outputs:
             logging.warning(f"`outputs` is None; empty outputs for dataloader={dataloader_idx}")
             return None
+
         val_loss_mean = torch.stack([x['val_loss/loss'] for x in outputs]).mean()
         # val_ats_loss_mean = torch.stack([x['val_ats_loss'] for x in outputs]).mean()
         val_pil_loss_mean = torch.stack([x['val_loss/pil_loss'] for x in outputs]).mean()
@@ -1058,9 +1064,118 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         logging.info(f"Batch Recall MEAN: {torch.mean(torch.tensor(self.batch_recall_list))}")
         logging.info(f"Batch ATS F1Acc. MEAN: {torch.mean(torch.tensor(self.batch_f1_accs_ats_list))}")
 
-    def on_validation_epoch_end(self) -> Optional[dict[str, dict[str, torch.Tensor]]]:
-        """Run validation with sync_dist=True."""
-        return super().on_validation_epoch_end(sync_metrics=True)
+    def on_validation_epoch_end(self, sync_metrics: bool = False) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
+        """
+        Default DataLoader for Validation set which automatically supports multiple data loaders
+        via `multi_validation_epoch_end`.
+
+        If multi dataset support is not required, override this method entirely in base class.
+        In such a case, there is no need to implement `multi_validation_epoch_end` either.
+
+        .. note::
+            If more than one data loader exists, and they all provide `val_loss`,
+            only the `val_loss` of the first data loader will be used by default.
+            This default can be changed by passing the special key `val_dl_idx: int`
+            inside the `validation_ds` config.
+
+        Args:
+            outputs: Single or nested list of tensor outputs from one or more data loaders.
+
+        Returns:
+            A dictionary containing the union of all items from individual data_loaders,
+            along with merged logs from all data loaders.
+        """
+        # Case where we dont provide data loaders
+        if self.validation_step_outputs is not None and len(self.validation_step_outputs) == 0:
+            return {}
+
+        # Case where we provide exactly 1 data loader
+        if isinstance(self.validation_step_outputs[0], dict):
+            output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
+
+            der_output = self._der_valid.compute()
+            der_output = {k: float(v) for k, v in der_output.items()}
+            der_output_collar = self._der_valid.compute(collar=0.25)
+            der_output_collar = {k: float(v) for k, v in der_output_collar.items()}
+            self._der_valid.reset()
+
+            output_dict['log']['val_metrics/der'] = der_output['der']
+            output_dict['log']['val_metrics/der_scored_speaker_time'] = der_output['scored_speaker_time']
+            output_dict['log']['val_metrics/der_missed_speaker_time'] = der_output['missed_speaker_time']
+            output_dict['log']['val_metrics/der_falarm_speaker_time'] = der_output['falarm_speaker_time']
+            output_dict['log']['val_metrics/der_speaker_error_time'] = der_output['speaker_error_time']
+            output_dict['log']['val_metrics/der_collar_0.25'] = der_output_collar['der']
+            output_dict['log']['val_metrics/der_collar_0.25_scored_speaker_time'] = der_output_collar['scored_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_missed_speaker_time'] = der_output_collar['missed_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_falarm_speaker_time'] = der_output_collar['falarm_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_speaker_error_time'] = der_output_collar['speaker_error_time']
+
+            if output_dict is not None and 'log' in output_dict:
+                self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)
+
+            self.validation_step_outputs.clear()  # free memory
+            return output_dict
+
+        else:  # Case where we provide more than 1 data loader
+            output_dict = {'log': {}}
+
+            # The output is a list of list of dicts, outer list corresponds to dataloader idx
+            for dataloader_idx, val_outputs in enumerate(self.validation_step_outputs):
+                # Get prefix and dispatch call to multi epoch end
+                dataloader_prefix = self.get_validation_dataloader_prefix(dataloader_idx)
+                dataloader_logs = self.multi_validation_epoch_end(val_outputs, dataloader_idx=dataloader_idx)
+
+                # If result was not provided, generate empty dict
+                dataloader_logs = dataloader_logs or {}
+
+                # Perform `val_loss` resolution first (if provided outside logs)
+                if 'val_loss' in dataloader_logs:
+                    if 'val_loss' not in output_dict and dataloader_idx == self._val_dl_idx:
+                        output_dict['val_loss'] = dataloader_logs['val_loss']
+
+                # For every item in the result dictionary
+                for k, v in dataloader_logs.items():
+                    # If the key is `log`
+                    if k == 'log':
+                        # Parse every element of the log, and attach the prefix name of the data loader
+                        log_dict = {}
+
+                        for k_log, v_log in v.items():
+                            # If we are logging the metric, but dont provide it at result level,
+                            # store it twice - once in log and once in result level.
+                            # Also mark log with prefix name to avoid log level clash with other data loaders
+                            if k_log not in output_dict['log'] and dataloader_idx == self._val_dl_idx:
+                                new_k_log = k_log
+
+                                # Also insert duplicate key with prefix for ease of comparison / avoid name clash
+                                log_dict[dataloader_prefix + k_log] = v_log
+
+                            else:
+                                # Simply prepend prefix to key and save
+                                new_k_log = dataloader_prefix + k_log
+
+                            # Store log value
+                            log_dict[new_k_log] = v_log
+
+                        # Update log storage of individual data loader
+                        output_logs = output_dict['log']
+                        output_logs.update(log_dict)
+
+                        # Update global log storage
+                        output_dict['log'] = output_logs
+
+                    else:
+                        # If any values are stored outside 'log', simply prefix name and store
+                        new_k = dataloader_prefix + k
+                        output_dict[new_k] = v
+
+                self.validation_step_outputs[dataloader_idx].clear()  # free memory
+
+            if 'log' in output_dict:
+                self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)
+
+            # return everything else
+            return output_dict
     
     def on_before_optimizer_step(self, optimizer):
         # Compute the 2-norm for each layer
