@@ -28,6 +28,7 @@ from lightning.pytorch.utilities import grad_norm
 from omegaconf import DictConfig
 from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
+from torchmetrics.classification import MultilabelAveragePrecision
 from tqdm import tqdm
 
 from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechE2ESpkDiarRandomChunkDataset
@@ -143,6 +144,8 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         )
         self.sortformer_modules.hidden_to_spks = None
         self.sortformer_modules.encoder_proj = None
+        self.sortformer_modules.hidden_to_spks = None
+        
         self._init_loss_weights()
 
         self.eps = 1e-3
@@ -174,6 +177,9 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
+
+        # self._mlap_train = MultilabelAveragePrecision()
+        # self._mlap_valid = MultilabelAveragePrecision()
 
         self._der_train = MeetevalDER()
         self._der_valid = MeetevalDER()
@@ -832,7 +838,12 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             (dict): A dictionary containing the following training metrics.
         """
         # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=(targets.sum(1) > 0).sum(-1))
+        if self.cfg.get('force_first_k_streams_to_be_active', False):
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
+        else:
+            n_speakers = (targets.sum(1) > 0).sum(-1)
+
+        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
         # targets_pil = get_pil_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
         # ats_loss = self.loss(probs=preds, labels=targets_ats, target_lens=target_lens)
         pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
@@ -883,7 +894,7 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         self.log_dict(train_metrics, sync_dist=True, on_step=True, on_epoch=False, logger=True)
         return {'loss': train_metrics['loss/loss']}
 
-    def _get_aux_validation_evaluations(self, preds, targets, target_lens) -> dict:
+    def _get_aux_validation_evaluations(self, preds, targets, target_lens, uniq_ids) -> dict:
         """
         Compute auxiliary validation evaluations including losses and metrics.
 
@@ -903,7 +914,23 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             val_metrics (dict): A dictionary containing the following validation metrics
         """
         # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=(targets.sum(1) > 0).sum(-1))
+        if self.cfg.get('force_first_k_streams_to_be_active', False):
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
+        else:
+            n_speakers = (targets.sum(1) > 0).sum(-1)
+
+        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
+
+        if self.cfg.get('save_predictions', False):
+            for i, uniq_id in enumerate(uniq_ids):
+                pred_num = 0
+                if os.path.exists(f'{self.trainer.log_dir}'):
+                    pred_num = len(list(filter(lambda x: x.startswith('pred_matrices'), os.listdir(f'{self.trainer.log_dir}')))) + 1
+                    
+                save_path = f'{self.trainer.log_dir}/pred_matrices_{pred_num}/{self.current_epoch}_{self.trainer.global_step}/{uniq_id}_preds.pt'
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                torch.save(preds[i][:target_lens[i]].detach().cpu(), save_path)
+                torch.save(targets_pil[i][:target_lens[i]].detach().cpu(), save_path.replace('_preds.pt', '_targets.pt'))
 
         # val_ats_loss = self.loss(probs=preds, labels=targets_ats, target_lens=target_lens)
         val_pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
@@ -956,7 +983,7 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             audio_signal_length=audio_signal_length,
         )
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
-            val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens)
+            val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens, uniq_ids)
             self._der_valid.update(preds, targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
         if isinstance(self.trainer.val_dataloaders, list) and len(self.trainer.val_dataloaders) > 1:
             self.validation_step_outputs[dataloader_idx].append(val_metrics)
