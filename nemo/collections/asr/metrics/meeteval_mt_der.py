@@ -142,8 +142,13 @@ class MeetevalDER(Metric):
                 spk_time = sum(l.duration for l in all_targets_rttm.lines)
                 res_der = {utt_id: Namespace(scored_speaker_time=Decimal(spk_time), missed_speaker_time=Decimal(spk_time), falarm_speaker_time=Decimal(0), speaker_error_time=Decimal(0))}
             else:
-                with warnings.catch_warnings(action="ignore"):
-                    res_der = meeteval.der.dscore(reference=all_targets_rttm, hypothesis=all_preds_rttm, collar=collar)
+                try:
+                    with warnings.catch_warnings(action="ignore"):
+                        res_der = meeteval.der.dscore(reference=all_targets_rttm, hypothesis=all_preds_rttm, collar=collar)
+                except Exception as e:
+                    print(f"Error scoring {utt_id}: {e}")
+                    spk_time = sum(l.duration for l in all_targets_rttm.lines)
+                    res_der = {utt_id: Namespace(scored_speaker_time=Decimal(spk_time), missed_speaker_time=Decimal(spk_time), falarm_speaker_time=Decimal(0), speaker_error_time=Decimal(0))}
             results.append(res_der)
 
         results = self._process_metric_res(results)
@@ -157,3 +162,7 @@ class MeetevalDER(Metric):
         res_all_ranks = self._reduce_res(res_all_ranks)
         res_all_ranks['der'] = (res_all_ranks['speaker_error_time'] + res_all_ranks['missed_speaker_time'] + res_all_ranks['falarm_speaker_time']) / res_all_ranks['scored_speaker_time']
         return res_all_ranks
+
+    def reset(self):
+        super().reset()
+        self.per_utt_data.clear()

@@ -141,6 +141,7 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         self.sortformer_modules = EENDEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
             self.device
         )
+        self.sortformer_modules.hidden_to_spks = None
         self.sortformer_modules.encoder_proj = None
         self._init_loss_weights()
 
@@ -1178,6 +1179,9 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             return output_dict
     
     def on_before_optimizer_step(self, optimizer):
+        for p_name, p in self.named_parameters():
+            if p.grad is None:
+                print('NO GRAD PARAM:', p_name)
         # Compute the 2-norm for each layer
         # If using mixed precision, the gradients are already unscaled here
         norms = grad_norm(self, norm_type=2)
