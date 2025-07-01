@@ -915,9 +915,9 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         """
         # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
         if self.cfg.get('force_first_k_streams_to_be_active', False):
-            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
-        else:
             n_speakers = (targets.sum(1) > 0).sum(-1)
+        else:
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
 
         targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
 
