@@ -144,7 +144,6 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
         )
         self.sortformer_modules.hidden_to_spks = None
         self.sortformer_modules.encoder_proj = None
-        self.sortformer_modules.hidden_to_spks = None
         
         self._init_loss_weights()
 
@@ -161,6 +160,10 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
 
         self.max_batch_dur = self._cfg.get("max_batch_dur", 20000)
         self.concat_and_pad_script = torch.jit.script(concat_and_pad)
+
+        self.force_first_k_streams_to_be_active = self._cfg.get("force_first_k_streams_to_be_active", False)
+        self.save_predictions = self._cfg.get("save_predictions", False)
+        self.max_num_of_spks = self._cfg.get("max_num_of_spks", 4)
 
     def _init_loss_weights(self):
         pil_weight = self._cfg.get("pil_weight", 0.0)
@@ -838,10 +841,10 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             (dict): A dictionary containing the following training metrics.
         """
         # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        if self.cfg.get('force_first_k_streams_to_be_active', False):
-            n_speakers = (targets.sum(1) > 0).sum(-1) + 1
+        if self.force_first_k_streams_to_be_active:
+            n_speakers = (targets.sum(1) > 0).sum(-1)
         else:
-            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
 
         targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
         # targets_pil = get_pil_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
@@ -914,14 +917,14 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
             val_metrics (dict): A dictionary containing the following validation metrics
         """
         # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        if self.cfg.get('force_first_k_streams_to_be_active', False):
+        if self.force_first_k_streams_to_be_active:
             n_speakers = (targets.sum(1) > 0).sum(-1)
         else:
-            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.cfg.max_num_of_spks
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
 
         targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
 
-        if self.cfg.get('save_predictions', False):
+        if self.save_predictions:
             for i, uniq_id in enumerate(uniq_ids):
                 pred_num = 0
                 if os.path.exists(f'{self.trainer.log_dir}'):
