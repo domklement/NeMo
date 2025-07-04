@@ -870,7 +870,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             (dict): A dictionary containing the 'loss' key with the calculated loss value.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, _, _, _ = batch
         preds = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens)
@@ -945,7 +945,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             dict: A dictionary containing various validation metrics for this batch.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, _, _, _ = batch
         preds = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
