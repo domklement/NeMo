@@ -1655,7 +1655,14 @@ def _eesd_train_collate_fn(self, batch):
             reshaping inputs to the EESD model.
     """
     packed_batch = list(zip(*batch))
-    audio_signal, feature_length, targets, target_len, uniq_ids, offsets, rttm_files = packed_batch
+    if len(packed_batch) == 4:
+        audio_signal, feature_length, targets, target_len = packed_batch
+        uniq_ids = [None] * len(audio_signal)
+        offsets = [None] * len(audio_signal)
+        rttm_files = [None] * len(audio_signal)
+    else:
+        audio_signal, feature_length, targets, target_len, uniq_ids, offsets, rttm_files = packed_batch
+
     audio_signal_list, feature_length_list = [], []
     target_len_list, targets_list = [], []
     uniq_ids_list = []
@@ -1667,7 +1674,14 @@ def _eesd_train_collate_fn(self, batch):
         max_ch = max([feat.shape[1] for feat in audio_signal])
     else:
         max_ch = 1
-    for feat, feat_len, tgt, segment_ct, uniq_id, offset, rttm_file in batch:
+    for b in batch:
+        if len(b) == 4:
+            feat, feat_len, tgt, segment_ct = b
+            uniq_id = torch.empty(1)
+            offset = torch.empty(1)
+            rttm_file = torch.empty(1)
+        else:
+            feat, feat_len, tgt, segment_ct, uniq_id, offset, rttm_file = b
         seq_len = tgt.shape[0]
         if len(feat.shape) > 1:
             pad_feat = (0, 0, 0, max_raw_feat_len - feat.shape[0])
