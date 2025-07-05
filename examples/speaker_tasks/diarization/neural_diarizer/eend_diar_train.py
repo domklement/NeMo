@@ -55,8 +55,11 @@ def main(cfg):
     if isinstance(trainer.logger, WandbLogger):
         trainer.logger.watch(eend_model, log="all", log_freq=500, log_graph=False)
 
-    if cfg.get('evaluate_at_start', False):
+    if cfg.get('evaluate_at_start', False) or cfg.get('decode_only', False):
         trainer.validate(eend_model)
+
+    if cfg.get('decode_only', False):
+        return
 
     # trainer.validate(eend_model)
     trainer.fit(eend_model)

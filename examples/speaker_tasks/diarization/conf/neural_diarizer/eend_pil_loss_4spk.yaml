@@ -40,7 +40,7 @@ model:
     tarred_audio_filepaths: null
     sample_rate: ${model.sample_rate}
     num_spks: ${model.max_num_of_spks}
-    session_len_sec: 300 # Maximum session length in seconds
+    session_len_sec: 3600 # Maximum session length in seconds
     soft_label_thres: 0.5 # A threshold value for setting up the binarized labels. The higher the more conservative the model becomes. 
     soft_targets: False
     labels: null
