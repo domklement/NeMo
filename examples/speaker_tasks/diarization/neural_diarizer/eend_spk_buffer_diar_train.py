@@ -50,6 +50,16 @@ def main(cfg):
         nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0")
         print('Loading NEST state dict:', eend_model.load_state_dict(nest_model.state_dict(), strict=False))
 
+        if cfg.get('freeze_nest_parameters', False):
+            eend_model_params = dict(eend_model.named_parameters())
+            eend_model_param_names = set(eend_model_params.keys())
+            frozen_params = []
+            for n, _ in nest_model.named_parameters():
+                if n in eend_model_param_names:
+                    frozen_params.append(n)
+                    eend_model_params[n].requires_grad = False
+            print(f'Frozen {len(frozen_params)} parameters: {frozen_params}')
+
     eend_model.maybe_init_from_pretrained_checkpoint(cfg)
 
     if isinstance(trainer.logger, WandbLogger):

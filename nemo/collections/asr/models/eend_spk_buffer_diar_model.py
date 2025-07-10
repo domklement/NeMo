@@ -1218,22 +1218,27 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         per_layer_norms = [[] for _ in range(len(self.encoder.layers))]
         pre_encode_layer_norms = []
         for k, v in norms.items():
-            if 'pre_encode' in k:
+            if 'pre_encode' in k and v is not None:
                 pre_encode_layer_norms.append(v)
-            elif 'encoder.layers' in k:
+            elif 'encoder.layers' in k and v is not None:
                 layer_num = int(k.split('encoder.layers.')[1].split('.')[0])
                 assert layer_num < len(self.encoder.layers)
                 per_layer_norms[layer_num].append(v)
 
         for l in range(len(self.encoder.layers)):
-            per_layer_norms[l] = torch.stack(per_layer_norms[l]).norm(2)
+            if per_layer_norms[l]:
+                    per_layer_norms[l] = torch.stack(per_layer_norms[l]).norm(2)
 
-        log_dict = {
-            'trainer/grad_l2_norm': norms['grad_2.0_norm_total'],
-            'per_block_grad_norms/pre_encode_grad_l2_norm': torch.stack(pre_encode_layer_norms).norm(2),
-        }
+        if len(pre_encode_layer_norms) > 0:
+            log_dict = {
+                'trainer/grad_l2_norm': norms['grad_2.0_norm_total'],
+                'per_block_grad_norms/pre_encode_grad_l2_norm': torch.stack(pre_encode_layer_norms).norm(2),
+            }
+
         for l in range(len(self.encoder.layers)):
-            log_dict[f'per_block_grad_norms/layer_{l}_grad_l2_norm'] = per_layer_norms[l]
+            if per_layer_norms[l]:
+                log_dict[f'per_block_grad_norms/layer_{l}_grad_l2_norm'] = per_layer_norms[l]
+
         self.log_dict(log_dict)
 
     @torch.no_grad()
