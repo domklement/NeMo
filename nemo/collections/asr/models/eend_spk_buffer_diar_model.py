@@ -929,8 +929,9 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 pred_num = 0
                 if os.path.exists(f'{self.trainer.log_dir}'):
                     pred_num = len(list(filter(lambda x: x.startswith('pred_matrices'), os.listdir(f'{self.trainer.log_dir}')))) + 1
-                    
+
                 save_path = f'{self.trainer.log_dir}/pred_matrices_{pred_num}/{self.current_epoch}_{self.trainer.global_step}/{uniq_id}_preds.pt'
+                print(f'Saving predictions to {save_path}')
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 torch.save(preds[i][:target_lens[i]].detach().cpu(), save_path)
                 torch.save(targets_pil[i][:target_lens[i]].detach().cpu(), save_path.replace('_preds.pt', '_targets.pt'))
@@ -1132,14 +1133,14 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
             output_dict['log']['val_metrics/der'] = der_output['der']
             output_dict['log']['val_metrics/der_scored_speaker_time'] = der_output['scored_speaker_time']
-            output_dict['log']['val_metrics/der_missed_speaker_time'] = der_output['missed_speaker_time']
-            output_dict['log']['val_metrics/der_falarm_speaker_time'] = der_output['falarm_speaker_time']
-            output_dict['log']['val_metrics/der_speaker_error_time'] = der_output['speaker_error_time']
+            output_dict['log']['val_metrics/der_missed_speaker_time'] = der_output['missed_speaker_time'] / der_output['scored_speaker_time']
+            output_dict['log']['val_metrics/der_falarm_speaker_time'] = der_output['falarm_speaker_time'] / der_output['scored_speaker_time']
+            output_dict['log']['val_metrics/der_speaker_error_time'] = der_output['speaker_error_time'] / der_output['scored_speaker_time']
             output_dict['log']['val_metrics/der_collar_0.25'] = der_output_collar['der']
             output_dict['log']['val_metrics/der_collar_0.25_scored_speaker_time'] = der_output_collar['scored_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_missed_speaker_time'] = der_output_collar['missed_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_falarm_speaker_time'] = der_output_collar['falarm_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_speaker_error_time'] = der_output_collar['speaker_error_time']
+            output_dict['log']['val_metrics/der_collar_0.25_missed_speaker_time'] = der_output_collar['missed_speaker_time'] / der_output_collar['scored_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_falarm_speaker_time'] = der_output_collar['falarm_speaker_time'] / der_output_collar['scored_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_speaker_error_time'] = der_output_collar['speaker_error_time'] / der_output_collar['scored_speaker_time']
 
             if output_dict is not None and 'log' in output_dict:
                 self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)

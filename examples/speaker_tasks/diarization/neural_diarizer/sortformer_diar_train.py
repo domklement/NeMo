@@ -15,6 +15,7 @@
 import lightning.pytorch as pl
 from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything
+from lightning.pytorch.loggers import WandbLogger
 
 from nemo.collections.asr.models import SortformerEncLabelModel
 from nemo.core.config import hydra_runner
@@ -44,6 +45,15 @@ def main(cfg):
     exp_manager(trainer, cfg.get("exp_manager", None))
     sortformer_model = SortformerEncLabelModel(cfg=cfg.model, trainer=trainer)
     sortformer_model.maybe_init_from_pretrained_checkpoint(cfg)
+
+    if cfg.get('init_from_nest', False):
+        from nemo.collections.asr.models import EncDecDenoiseMaskedTokenPredModel
+        nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0", map_location="cpu")
+        print('Loading NEST state dict:', sortformer_model.load_state_dict(nest_model.state_dict(), strict=False))
+
+    if isinstance(trainer.logger, WandbLogger):
+        trainer.logger.watch(sortformer_model, log="all", log_freq=500, log_graph=False)
+
     trainer.fit(sortformer_model)
 
     if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:

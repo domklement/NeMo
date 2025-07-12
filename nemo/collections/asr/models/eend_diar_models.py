@@ -1132,14 +1132,14 @@ class EENDEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
 
             output_dict['log']['val_metrics/der'] = der_output['der']
             output_dict['log']['val_metrics/der_scored_speaker_time'] = der_output['scored_speaker_time']
-            output_dict['log']['val_metrics/der_missed_speaker_time'] = der_output['missed_speaker_time']
-            output_dict['log']['val_metrics/der_falarm_speaker_time'] = der_output['falarm_speaker_time']
-            output_dict['log']['val_metrics/der_speaker_error_time'] = der_output['speaker_error_time']
+            output_dict['log']['val_metrics/der_missed_speaker_time'] = der_output['missed_speaker_time'] / der_output['scored_speaker_time']
+            output_dict['log']['val_metrics/der_falarm_speaker_time'] = der_output['falarm_speaker_time'] / der_output['scored_speaker_time']
+            output_dict['log']['val_metrics/der_speaker_error_time'] = der_output['speaker_error_time'] / der_output['scored_speaker_time']
             output_dict['log']['val_metrics/der_collar_0.25'] = der_output_collar['der']
             output_dict['log']['val_metrics/der_collar_0.25_scored_speaker_time'] = der_output_collar['scored_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_missed_speaker_time'] = der_output_collar['missed_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_falarm_speaker_time'] = der_output_collar['falarm_speaker_time']
-            output_dict['log']['val_metrics/der_collar_0.25_speaker_error_time'] = der_output_collar['speaker_error_time']
+            output_dict['log']['val_metrics/der_collar_0.25_missed_speaker_time'] = der_output_collar['missed_speaker_time'] / der_output_collar['scored_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_falarm_speaker_time'] = der_output_collar['falarm_speaker_time'] / der_output_collar['scored_speaker_time']
+            output_dict['log']['val_metrics/der_collar_0.25_speaker_error_time'] = der_output_collar['speaker_error_time'] / der_output_collar['scored_speaker_time']
 
             if output_dict is not None and 'log' in output_dict:
                 self.log_dict(output_dict.pop('log'), on_epoch=True, sync_dist=sync_metrics)

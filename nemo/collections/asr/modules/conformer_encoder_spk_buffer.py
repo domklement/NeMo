@@ -220,6 +220,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         sync_max_audio_length: bool = True,
         prepend_global_tokens: bool = False, # If True, add trainable tokens to the beginning of the sequence
         use_ce_spk_buffer: bool = False, # If True, use the CE speaker buffer as well at the end of the ConformerLayer.
+        use_ce_spk_buffer_bias: bool = True, # If True, use bias in the CE speaker buffer.
         share_spk_buffer: bool = False, # If True, share the speaker buffer between the ConformerLayer and the CE speaker buffer.
         spk_buffer_size: int = 128,
     ):
@@ -271,6 +272,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         self.use_ce_spk_buffer = use_ce_spk_buffer
         self.spk_buffer_size = spk_buffer_size
         self.share_spk_buffer = share_spk_buffer
+        self.use_ce_spk_buffer_bias = use_ce_spk_buffer_bias
 
         if self.prepend_global_tokens:
             assert self.global_tokens_spacing == 1, "global_tokens_spacing must be 1 when prepend_global_tokens is True"
@@ -292,6 +294,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                     dropout_rate=self.dropout_att,
                     use_pytorch_sdpa=self.use_pytorch_sdpa,
                     use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                    use_bias=self.use_ce_spk_buffer_bias, # The layer is followed by a LayerNorm, so no bias is needed (technically).
                 )
                 for _ in range(self.n_layers)
             ])
@@ -299,7 +302,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                 nn.LayerNorm(self.d_model)
                 for _ in range(self.n_layers)
             ])
-        print("spk_buffer", self.spk_buffer)
+        # print("spk_buffer", self.spk_buffer)
 
     @typecheck()
     def forward(

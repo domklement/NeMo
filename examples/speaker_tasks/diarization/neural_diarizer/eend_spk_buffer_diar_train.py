@@ -42,13 +42,27 @@ def main(cfg):
     """Main function for training the sortformer diarizer model."""
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
     trainer = pl.Trainer(**cfg.trainer)
+
+    if cfg.get('load_everything_from_ptl_ckpt', False):
+        from torch import load as torch_load
+        x = torch_load(cfg.load_everything_from_ptl_ckpt, weights_only=False)
+        model_cfg = dict(x['hyper_parameters']['cfg'])
+        model_cfg.pop('train_ds')
+        model_cfg.pop('validation_ds')
+        model_cfg.pop('test_ds')
+        cfg.model = {**cfg.model, **model_cfg}
+
     exp_manager(trainer, cfg.get("exp_manager", None))
     eend_model = EENDSpkBuffEncLabelModel(cfg=cfg.model, trainer=trainer)
 
-    if cfg.get('init_from_nest', False):
+    if cfg.get('init_from_nest', False) or cfg.get('init_conv_downsampling_from_nest', False):
         from nemo.collections.asr.models import EncDecDenoiseMaskedTokenPredModel
-        nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0")
-        print('Loading NEST state dict:', eend_model.load_state_dict(nest_model.state_dict(), strict=False))
+        nest_model = EncDecDenoiseMaskedTokenPredModel.from_pretrained(model_name="nvidia/ssl_en_nest_large_v1.0", map_location='cpu')
+
+        if not cfg.get('init_from_nest', False):
+            print('Loading NEST feature extractor state dict:', eend_model.encoder.pre_encode.load_state_dict(nest_model.encoder.pre_encode.state_dict(), strict=False))
+        else:
+            print('Loading NEST state dict:', eend_model.load_state_dict(nest_model.state_dict(), strict=False))
 
         if cfg.get('freeze_nest_parameters', False):
             eend_model_params = dict(eend_model.named_parameters())
@@ -59,8 +73,15 @@ def main(cfg):
                     frozen_params.append(n)
                     eend_model_params[n].requires_grad = False
             print(f'Frozen {len(frozen_params)} parameters: {frozen_params}')
+    
+    if cfg.get('freeze_conv_downsampling', False):
+        for p in eend_model.encoder.pre_encode.parameters():
+            p.requires_grad = False
 
-    eend_model.maybe_init_from_pretrained_checkpoint(cfg)
+    if cfg.get('load_everything_from_ptl_ckpt', False):
+        eend_model.load_state_dict(x['state_dict'])
+    else:
+        eend_model.maybe_init_from_pretrained_checkpoint(cfg)
 
     if isinstance(trainer.logger, WandbLogger):
         trainer.logger.watch(eend_model, log="all", log_freq=500, log_graph=False)

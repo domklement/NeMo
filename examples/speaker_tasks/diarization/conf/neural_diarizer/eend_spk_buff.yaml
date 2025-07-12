@@ -121,7 +121,7 @@ model:
     att_context_style: regular # regular or chunked_limited
     xscaling: true # scales up the input embeddings by sqrt(d_model)
     untie_biases: true # unties the biases of the TransformerXL layers
-    pos_emb_max_len: 45000
+    pos_emb_max_len: 5000
     # Convolution module's params
     conv_kernel_size: 9
     conv_norm_type: 'batch_norm' # batch_norm or layer_norm or groupnormN (N specifies the number of groups)

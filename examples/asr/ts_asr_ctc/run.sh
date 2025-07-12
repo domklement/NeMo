@@ -37,9 +37,40 @@ export WANDB_MODE="online"
 #     +model.decoding.compute_timestamps=True \
 #     +model.decoding.strategy=greedy
 
+# python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
+#     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \
+#     --config-name="fast-conformer_ctc_bpe_stno_parakeet_0.6b.yaml" \
+#     model.train_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/ami_nsf_l2m_both_100_360_compound_trainset.jsonl \
+#     model.validation_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/notsofar_eval_sc_cutset.jsonl \
+#     model.tokenizer.dir=/tmp/tokenizers/ls960/tokenizer_spe_bpe_v500 \
+#     model.tokenizer.type=bpe \
+#     trainer.devices=-1 \
+#     trainer.accelerator=gpu \
+#     trainer.strategy=ddp \
+#     +evaluate_at_start=true \
+#     trainer.max_epochs=100 \
+#     model.fddt_lr_multiplier=100 \
+#     trainer.log_every_n_steps=10 \
+#     model.train_ds.batch_size=32 \
+#     model.optim.sched.warmup_steps=2000 \
+#     model.optim.lr=5e-4 \
+#     trainer.accumulate_grad_batches=2 \
+#     model.validation_ds.batch_size=1 \
+#     exp_manager.resume_if_exists=True \
+#     exp_manager.resume_ignore_no_checkpoint=True \
+#     exp_manager.exp_dir=/tmp/nemo_experiments \
+#     exp_manager.checkpoint_callback_params.monitor=val/cp_wer \
+#     exp_manager.create_wandb_logger=True \
+#     exp_manager.wandb_logger_kwargs.name=parakeet_ctc_0.6b_fddt_lr_mul_100_lr5e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+#     exp_manager.wandb_logger_kwargs.project=dk_nemo_tests \
+#     +init_from_pretrained=nvidia/parakeet-ctc-0.6b \
+#     name=parakeet_ctc_0.6b_fddt_lr_mul_100_lr5e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+#     +model.decoding.compute_timestamps=True \
+#     +model.decoding.preserve_alignments=True
+
 python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \
-    --config-name="fast-conformer_ctc_bpe_stno_parakeet_0.6b.yaml" \
+    --config-name="fast-conformer_ctc_bpe_stno_parakeet_110m.yaml" \
     model.train_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/ami_nsf_l2m_both_100_360_compound_trainset.jsonl \
     model.validation_ds.manifest_filepath=/tmp/dicow_data/nemo_manifests/notsofar_eval_sc_cutset.jsonl \
     model.tokenizer.dir=/tmp/tokenizers/ls960/tokenizer_spe_bpe_v500 \
@@ -53,7 +84,7 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     trainer.log_every_n_steps=10 \
     model.train_ds.batch_size=32 \
     model.optim.sched.warmup_steps=2000 \
-    model.optim.lr=5e-4 \
+    model.optim.lr=1e-4 \
     trainer.accumulate_grad_batches=2 \
     model.validation_ds.batch_size=1 \
     exp_manager.resume_if_exists=True \
@@ -61,10 +92,10 @@ python ~/NeMo/examples/asr/ts_asr_ctc/speech_to_text_ctc_bpe.py \
     exp_manager.exp_dir=/tmp/nemo_experiments \
     exp_manager.checkpoint_callback_params.monitor=val/cp_wer \
     exp_manager.create_wandb_logger=True \
-    exp_manager.wandb_logger_kwargs.name=parakeet_ctc_0.6b_fddt_lr_mul_100_lr5e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+    exp_manager.wandb_logger_kwargs.name=parakeet_ctc_110m_fddt_lr_mul_100_lr1e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_128bs_fixed_lrmul \
     exp_manager.wandb_logger_kwargs.project=dk_nemo_tests \
-    +init_from_pretrained=nvidia/parakeet-ctc-0.6b \
-    name=parakeet_ctc_0.6b_fddt_lr_mul_100_lr5e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_64bs \
+    +init_from_pretrained=nvidia/parakeet-tdt_ctc-110m \
+    name=parakeet_110m_ctconly_fddt_lr_mul_100_lr1e-4_ami_nsf_l2m_30s_nsf_dev_longform_2k_warmup_128bs_fixed_lrmul \
     +model.decoding.compute_timestamps=True \
     +model.decoding.preserve_alignments=True
 
