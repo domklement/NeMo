@@ -103,12 +103,12 @@ class MeetevalDER(Metric):
 
                 utt_id = f'{utt_id}_{str(offset.item()).replace(".", "_")}'
                 pred_segments = self._tensor_to_segments(pred, utt_id, 0)
-                
+
                 if utt_id not in self.per_utt_data:
                     self.per_utt_data[utt_id] = dict()
                     # self.per_utt_data[utt_id]['target_segments'] = meeteval.io.load(rttm_file_path)
                     self.per_utt_data[utt_id]['target_segments'] = self._tensor_to_segments(target, utt_id, 0)
-                
+
                 if 'pred_segments' not in self.per_utt_data[utt_id]:
                     self.per_utt_data[utt_id]['pred_segments'] = []
                 self.per_utt_data[utt_id]['pred_segments'].extend(pred_segments)
@@ -131,8 +131,43 @@ class MeetevalDER(Metric):
             for k in res:
                 res[k] += res_rank[k]
         return res
+    
+    def _write_pred_RTTM(self, rttm: RTTM, rttm_file_path: str):
+        with open(rttm_file_path, 'w') as f:
+            for line in rttm.lines:
+                f.write(f'{line.type} {line.filename.split("_")[0]} {line.channel} {line.begin_time:.3f} {line.duration:.3f} {line.orthography} {line.speaker_type} {line.speaker_id} {line.confidence} {line.signal_look_ahead_time}\n')
 
-    def compute(self, collar=0.0):
+    @staticmethod
+    def _merge_rttm_segments(rttm_lines: List[RTTMLine]):
+        rttm_lines.sort(key=lambda x: x.begin_time)
+        per_spk_rttm_lines = dict()
+        res = []
+
+        for line in rttm_lines:
+            if line.speaker_id not in per_spk_rttm_lines:
+                per_spk_rttm_lines[line.speaker_id] = []
+            per_spk_rttm_lines[line.speaker_id].append(line)
+
+        for spk in per_spk_rttm_lines:
+            merged_rttm_lines = []
+            current_start_time = per_spk_rttm_lines[spk][0].begin_time
+            current_end_time = per_spk_rttm_lines[spk][0].begin_time + per_spk_rttm_lines[spk][0].duration
+
+            for line in per_spk_rttm_lines[spk][1:]:
+                if line.begin_time <= current_end_time:
+                    current_end_time = max(current_end_time, line.begin_time + line.duration)
+                else:
+                    merged_rttm_lines.append(RTTMLine(type='SPEAKER', filename=line.filename, channel=line.channel, begin_time=current_start_time, duration=current_end_time - current_start_time, orthography=line.orthography, speaker_type=line.speaker_type, speaker_id=line.speaker_id, confidence=line.confidence, signal_look_ahead_time=line.signal_look_ahead_time))
+                    current_start_time = line.begin_time
+                    current_end_time = line.begin_time + line.duration
+
+            merged_rttm_lines.append(RTTMLine(type='SPEAKER', filename=line.filename, channel=line.channel, begin_time=current_start_time, duration=current_end_time - current_start_time, orthography=line.orthography, speaker_type=line.speaker_type, speaker_id=line.speaker_id, confidence=line.confidence, signal_look_ahead_time=line.signal_look_ahead_time))
+            res.extend(merged_rttm_lines)
+
+        return res
+
+
+    def compute(self, collar=0.0, pred_rttm_path=None):
         results = []
         for utt_id in self.per_utt_data:
             all_targets_rttm = RTTM(lines=self.per_utt_data[utt_id]['target_segments'])
@@ -151,6 +186,16 @@ class MeetevalDER(Metric):
                     res_der = {utt_id: Namespace(scored_speaker_time=Decimal(spk_time), missed_speaker_time=Decimal(spk_time), falarm_speaker_time=Decimal(0), speaker_error_time=Decimal(0))}
             results.append(res_der)
 
+        flattened_preds = []
+        flattened_targets = []
+        for uid in self.per_utt_data:
+            flattened_preds.extend(self.per_utt_data[uid]['pred_segments'])
+            flattened_targets.extend(self.per_utt_data[uid]['target_segments'])
+        merged_preds = self._merge_rttm_segments(flattened_preds)
+        merged_targets = self._merge_rttm_segments(flattened_targets)
+        merged_pred_rttm = RTTM(lines=merged_preds)
+        merged_target_rttm = RTTM(lines=merged_targets)
+
         results = self._process_metric_res(results)
 
         res_all_ranks = [None] * get_world_size()
@@ -161,6 +206,10 @@ class MeetevalDER(Metric):
 
         res_all_ranks = self._reduce_res(res_all_ranks)
         res_all_ranks['der'] = (res_all_ranks['speaker_error_time'] + res_all_ranks['missed_speaker_time'] + res_all_ranks['falarm_speaker_time']) / res_all_ranks['scored_speaker_time']
+
+        if pred_rttm_path is not None:
+            self._write_pred_RTTM(merged_pred_rttm, rttm_file_path=pred_rttm_path)
+
         return res_all_ranks
 
     def reset(self):

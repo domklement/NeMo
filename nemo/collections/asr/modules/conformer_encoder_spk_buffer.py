@@ -280,10 +280,10 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
 
         if self.use_ce_spk_buffer:
             if self.share_spk_buffer:
-                self.spk_buffer = nn.Parameter(torch.randn(spk_buffer_size, self.d_model))
+                self.spk_buffer = nn.Parameter(torch.randn(self.spk_buffer_size, self.d_model))
             else:
                 self.spk_buffer = nn.ParameterList([
-                    nn.Parameter(torch.randn(spk_buffer_size, self.d_model))
+                    nn.Parameter(torch.randn(self.spk_buffer_size, self.d_model))
                     for _ in range(self.n_layers)
                 ])
 

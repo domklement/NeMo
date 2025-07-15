@@ -655,6 +655,7 @@ class RelPositionMultiHeadAttentionLongformer(RelPositionMultiHeadAttention):
         key_only_global[is_local_index_global_attn_nonzero] = key[is_index_global_attn_nonzero]
 
         # (batch_size, seq_len, head, max_num_global_attn_indices)
+        # Computes dot-prod between query - input acoustic sequence, and global keys (global tokens).
         attn_probs_from_global_key = torch.einsum("blhd,bshd->blhs", (query, key_only_global))
 
         # need to transpose since ONNX export only supports consecutive indexing: https://pytorch.org/docs/stable/onnx.html#writes-sets

@@ -14,8 +14,10 @@
 
 # pylint: disable=E1101
 import itertools
+from functools import partial
 import math
 import os
+from pathlib import Path
 import random
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -30,6 +32,7 @@ from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
 from torchmetrics.classification import MultilabelAveragePrecision
 from tqdm import tqdm
+import torchaudio
 
 from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechE2ESpkDiarRandomChunkDataset
 from nemo.collections.asr.data.audio_to_diar_label_lhotse import LhotseAudioToSpeechE2ESpkDiarDataset
@@ -48,6 +51,7 @@ from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import AudioSignal, LengthsType, NeuralType
 from nemo.core.neural_types.elements import ProbsType
 from nemo.utils import logging
+from nemo.collections.asr.losses.pit_wrapper import PITLossWrapper
 
 __all__ = ['EENDSpkBuffEncLabelModel']
 
@@ -150,6 +154,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.eps = 1e-3
         self.negative_init_val = -99
         self.loss = instantiate(self._cfg.loss)
+        self.pit_loss_wrapper = PITLossWrapper(self.loss, pit_from="pw_pt")
 
         self.async_streaming = self._cfg.get("async_streaming", False)
         self.streaming_mode = self._cfg.get("streaming_mode", False)
@@ -164,6 +169,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.force_first_k_streams_to_be_active = self._cfg.get("force_first_k_streams_to_be_active", False)
         self.save_predictions = self._cfg.get("save_predictions", False)
         self.max_num_of_spks = self._cfg.get("max_num_of_spks", 4)
+        self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
 
     def _init_loss_weights(self):
         pil_weight = self._cfg.get("pil_weight", 0.0)
@@ -846,27 +852,24 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         else:
             n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
 
-        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
-        # targets_pil = get_pil_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        # ats_loss = self.loss(probs=preds, labels=targets_ats, target_lens=target_lens)
+        if self.use_bce_for_hungarian:
+            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True, loss_fn_for_cost_mx_construction=partial(self.loss, target_lens=target_lens))
+        else:
+            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True)
+
         pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
         loss = self.pil_weight * pil_loss
 
         self._accuracy_train(preds, targets_pil, target_lens)
         train_f1_acc, train_precision, train_recall = self._accuracy_train.compute()
 
-        # self._accuracy_train_ats(preds, targets_ats, target_lens)
-        # train_f1_acc_ats, _, _ = self._accuracy_train_ats.compute()
-
         train_metrics = {
             'loss/loss': loss,
-            # 'ats_loss': ats_loss,
             'loss/pil_loss': pil_loss,
             'trainer/learning_rate': self._optimizer.param_groups[0]['lr'],
             'train_metrics/f1_acc': train_f1_acc,
             'train_metrics/precision': train_precision,
             'train_metrics/recall': train_recall,
-            # 'train_f1_acc_ats': train_f1_acc_ats,
         }
         return train_metrics
 
@@ -922,19 +925,32 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         else:
             n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
 
-        targets_pil = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers)
+        if self.use_bce_for_hungarian:
+            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True, loss_fn_for_cost_mx_construction=partial(self.loss, target_lens=target_lens))
+        else:
+            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True)
+        # losses, perm_inds2 = self.pit_loss_wrapper(preds.transpose(-1, -2), targets.transpose(-1,-2), target_lens=target_lens, return_est=True)
 
         if self.save_predictions:
-            for i, uniq_id in enumerate(uniq_ids):
-                pred_num = 0
+            if not hasattr(self, 'pred_num'):
+                self.pred_num = 0
                 if os.path.exists(f'{self.trainer.log_dir}'):
-                    pred_num = len(list(filter(lambda x: x.startswith('pred_matrices'), os.listdir(f'{self.trainer.log_dir}')))) + 1
-
-                save_path = f'{self.trainer.log_dir}/pred_matrices_{pred_num}/{self.current_epoch}_{self.trainer.global_step}/{uniq_id}_preds.pt'
+                    self.pred_num = len(list(filter(lambda x: x.startswith('pred_matrices'), os.listdir(f'{self.trainer.log_dir}')))) + 1
+                
+            os.makedirs(f'{self.trainer.log_dir}/pred_matrices_{self.pred_num}/{self.current_epoch}_{self.trainer.global_step}', exist_ok=True)
+            for i, uniq_id in enumerate(uniq_ids):
+                fnum = len(list(filter(lambda x: x.endswith('.wav'), os.listdir(f'{self.trainer.log_dir}/pred_matrices_{self.pred_num}/{self.current_epoch}_{self.trainer.global_step}')))) + 1
+                save_path = f'{self.trainer.log_dir}/pred_matrices_{self.pred_num}/{self.current_epoch}_{self.trainer.global_step}/{uniq_id}_{fnum}.wav'
                 print(f'Saving predictions to {save_path}')
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                torch.save(preds[i][:target_lens[i]].detach().cpu(), save_path)
-                torch.save(targets_pil[i][:target_lens[i]].detach().cpu(), save_path.replace('_preds.pt', '_targets.pt'))
+
+                output = torch.empty((targets.shape[1], 2*self.max_num_of_spks), dtype=preds.dtype, device='cpu')
+                output[:, 0::2] = targets_pil[i].detach().cpu()*0.8  # Even indices get tensor a
+                output[:, 1::2] = preds[i].detach().cpu() # Odd indices get tensor b
+                torchaudio.save(save_path, output.T.float(), sample_rate=16000, format="wav", encoding="PCM_F")
+
+                # os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                # torch.save(preds[i][:target_lens[i]].detach().cpu(), save_path)
+                # torch.save(targets_pil[i][:target_lens[i]].detach().cpu(), save_path.replace('_preds.pt', '_targets.pt'))
 
         # val_ats_loss = self.loss(probs=preds, labels=targets_ats, target_lens=target_lens)
         val_pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
@@ -1125,7 +1141,13 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         if isinstance(self.validation_step_outputs[0], dict):
             output_dict = self.multi_validation_epoch_end(self.validation_step_outputs, dataloader_idx=0)
 
-            der_output = self._der_valid.compute()
+            other_pred_rttm_files = Path(self.trainer.log_dir).glob("preds*.rttm")
+            preds_count = 0
+            for fold in other_pred_rttm_files:
+                if fold.is_file():
+                    preds_count += 1
+
+            der_output = self._der_valid.compute(pred_rttm_path=f'{self.trainer.log_dir}/preds_val_{preds_count}.rttm')
             der_output = {k: float(v) for k, v in der_output.items()}
             der_output_collar = self._der_valid.compute(collar=0.25)
             der_output_collar = {k: float(v) for k, v in der_output_collar.items()}
@@ -1241,6 +1263,66 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 log_dict[f'per_block_grad_norms/layer_{l}_grad_l2_norm'] = per_layer_norms[l]
 
         self.log_dict(log_dict)
+
+    def setup_optimizer_param_groups(self):
+        if not hasattr(self, "parameters"):
+            self._optimizer_param_groups = None
+            return
+
+        known_groups = []
+        param_groups = []
+
+        learnable_vectors_group = []
+        other_group = []
+        for n, p in self.named_parameters():
+            if '.spk_buffer.' in n or 'extra_global_tokens' in n:
+                print('LEARNABLE VECTOR:', n)
+                learnable_vectors_group.append(p)
+            else:
+                other_group.append(p)
+
+        param_groups = [
+            {
+                "params": learnable_vectors_group, "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100)
+            },
+            {
+                "params": other_group
+            }
+        ]
+
+        if "optim_param_groups" in self.cfg:
+            raise NotImplementedError("optim_param_groups is not implemented")
+
+        # if "optim_param_groups" in self.cfg:
+        #     param_groups_cfg = self.cfg.optim_param_groups
+        #     for group, group_cfg in param_groups_cfg.items():
+        #         module = getattr(self, group, None)
+        #         if module is None:
+        #             raise ValueError(f"{group} not found in model.")
+        #         elif hasattr(module, "parameters"):
+        #             known_groups.append(group)
+        #             new_group = {"params": list(module.parameters())}
+        #             for k, v in group_cfg.items():
+        #                 new_group[k] = v
+        #             param_groups.append(new_group)
+        #         else:
+        #             raise ValueError(f"{group} does not have parameters.")
+
+        #     other_params = []
+        #     for n, p in self.named_parameters():
+        #         is_unknown = True
+        #         for group in known_groups:
+        #             if n.startswith(group):
+        #                 is_unknown = False
+        #         if is_unknown:
+        #             other_params.append(p)
+
+        #     if len(other_params):
+        #         param_groups = [{"params": other_params}] + param_groups
+        # else:
+        #     param_groups.append({"params": list(filter(lambda x: x not in learnable_vectors_group, self.parameters()))})
+
+        self._optimizer_param_groups = param_groups
 
     @torch.no_grad()
     def diarize(

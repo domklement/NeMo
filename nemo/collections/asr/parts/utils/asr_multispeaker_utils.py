@@ -180,9 +180,16 @@ def get_pil_targets(labels: torch.Tensor, preds: torch.Tensor, speaker_permutati
     return max_score_permed_labels  # (batch_size, num_speakers, num_classes)
 
 
-def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor) -> torch.Tensor:
-    preds_t = preds.detach().transpose(1, 2)
-    cost_mxs = -logsigmoid(preds_t).bmm(labels) - logsigmoid(-preds_t).bmm(1-labels)
+def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor, return_perm_inds: bool = False, loss_fn_for_cost_mx_construction = None) -> torch.Tensor:
+    if loss_fn_for_cost_mx_construction is None:
+        preds_t = preds.detach().transpose(1, 2)
+        cost_mxs = -logsigmoid(preds_t).bmm(labels) - logsigmoid(-preds_t).bmm(1-labels)
+    else:
+        cost_mxs = torch.empty((labels.shape[0], labels.shape[-1], labels.shape[-1]), device=labels.device)
+        for k in range(labels.shape[0]):
+            for i in range(labels.shape[-1]):
+                for j in range(labels.shape[-1]):
+                    cost_mxs[k, i, j] = loss_fn_for_cost_mx_construction(probs=preds[k, :, i].unsqueeze(1).unsqueeze(0), labels=labels[k, :, j].unsqueeze(1).unsqueeze(0))
 
     max_n_speakers = max(n_speakers)
     batch_perm_inds = []
@@ -197,6 +204,9 @@ def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speak
         batch_perm_inds.append(ref_alig)
 
     batch_perm_inds = torch.tensor(batch_perm_inds).to(preds.device)
+    if return_perm_inds:
+        return reconstruct_labels(labels, batch_perm_inds), batch_perm_inds
+    
     return reconstruct_labels(labels, batch_perm_inds)
 
 
