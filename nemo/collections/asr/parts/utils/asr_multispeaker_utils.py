@@ -194,7 +194,7 @@ def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speak
     max_n_speakers = max(n_speakers)
     batch_perm_inds = []
 
-    for i, cost_mx in enumerate(cost_mxs.cpu().numpy()):
+    for i, cost_mx in enumerate(cost_mxs.detach().cpu().numpy()):
         if max_n_speakers > n_speakers[i]:
             max_value = np.absolute(cost_mx).sum()
             cost_mx[-(max_n_speakers-n_speakers[i]):] = max_value
