@@ -140,6 +140,11 @@ class TransformerAttractors(nn.Module):
         self.global_embeddings = nn.Parameter(torch.randn(self.n_speakers + 1, self.d_model))
         self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
         self.attractor_proj = nn.Linear(self.d_model, 1)
+
+        for n, p in self.named_parameters():
+            if 'norm' not in n:
+                p.data = p.data * 0.02
+
         
     def forward_combiner(self, utt_embedding, alpha=1.0):
         return alpha * nn.functional.sigmoid(utt_embedding).unsqueeze(1) * self.global_embeddings.unsqueeze(0)
@@ -254,6 +259,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 n_heads=4,
                 dropout_att=0.0,
             )
+            self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
+            self.emb_seq_ln.weight.data = self.emb_seq_ln.weight.data * 0.02
 
         else:
             self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
@@ -445,7 +452,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         """
         attractors, attr_logits = self.transformer_attractors(global_tokens[:, 0, :], emb_seq, emb_seq_length)
         attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
-        logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
+        logits = torch.bmm(self.emb_seq_ln(emb_seq), attractors.transpose(-1,-2))
         return logits, attractors, attr_logits
 
     def _diarize_forward(self, batch: Any):
@@ -1000,6 +1007,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
 
         train_metrics['stats/perc_silence'] = ((targets > 0)[0].sum(-1) == 0).float().mean()
+        train_metrics['stats/min_logit'] = preds.min()
+        train_metrics['stats/max_logit'] = preds.max()
 
         self._reset_train_metrics()
         self.log_dict(train_metrics, sync_dist=True, on_step=True, on_epoch=False, logger=True)
@@ -1119,7 +1128,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
                 output = torch.empty((targets.shape[1], 2*self.max_num_of_spks), dtype=preds.dtype, device='cpu')
                 output[:, 0::2] = targets_pil[i].detach().cpu()*0.8  # Even indices get tensor a
-                output[:, 1::2] = preds[i].detach().cpu() # Odd indices get tensor b
+                output[:, 1::2] = torch.nn.functional.sigmoid(preds[i]).detach().cpu() # Odd indices get tensor b
                 torchaudio.save(save_path, output.T.float(), sample_rate=16000, format="wav", encoding="PCM_F")
 
         loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)

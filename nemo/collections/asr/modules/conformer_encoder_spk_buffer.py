@@ -302,6 +302,10 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                 nn.LayerNorm(self.d_model)
                 for _ in range(self.n_layers)
             ])
+            self.spk_buffer_out_ln = nn.ModuleList([
+                nn.LayerNorm(self.d_model)
+                for _ in range(self.n_layers)
+            ])
         # print("spk_buffer", self.spk_buffer)
 
     @typecheck()
@@ -469,6 +473,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                 residual = audio_signal
                 audio_signal = self.spk_buffer_ln[lth](audio_signal)
                 audio_signal = self.spk_buffer_ce[lth](audio_signal, spk_buffer, spk_buffer, mask=None) + residual
+                audio_signal = self.spk_buffer_out_ln[lth](audio_signal)
 
             if cache_last_channel_cur is not None:
                 (audio_signal, cache_last_channel_cur, cache_last_time_cur) = audio_signal
