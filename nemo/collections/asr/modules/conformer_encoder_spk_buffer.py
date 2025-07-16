@@ -313,6 +313,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        output_prepend_global_tokens=False,
     ):
         """
         Forward function for the ConformerEncoder accepting an audio signal and its corresponding length.
@@ -349,6 +350,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
             cache_last_time=cache_last_time,
             cache_last_channel_len=cache_last_channel_len,
             bypass_pre_encode=bypass_pre_encode,
+            output_prepend_global_tokens=output_prepend_global_tokens,
         )
 
     def forward_internal(
@@ -359,6 +361,7 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        output_prepend_global_tokens=False,
     ):
         # print(self.spk_buffer[0], self.extra_global_tokens)
         """
@@ -513,7 +516,8 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                     )
                     self.register_accessible_tensor(name=f'interctc/layer_length_{lth}', tensor=length)
 
-        if self.prepend_global_tokens:
+        if output_prepend_global_tokens:
+            global_tokens_out = audio_signal[:, :self.global_tokens, :]
             audio_signal = audio_signal[:, self.global_tokens:, :]
             pad_mask = pad_mask[:, self.global_tokens:]
 
@@ -527,6 +531,13 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         audio_signal = torch.transpose(audio_signal, 1, 2)
         length = length.to(dtype=torch.int64)
 
+        if output_prepend_global_tokens:
+            return (
+                audio_signal,
+                length,
+                global_tokens_out,
+            )
+
         if cache_last_channel is not None:
             cache_last_channel_next = torch.stack(cache_last_channel_next, dim=0)
             cache_last_time_next = torch.stack(cache_last_time_next, dim=0)
@@ -538,7 +549,36 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                 torch.clamp(cache_last_channel_len + cache_keep_size, max=cache_len),
             )
         else:
-            return audio_signal, length
+            return audio_signal, length, None
+        
+    @property
+    def input_types(self):
+        """Returns definitions of module input ports."""
+        return OrderedDict(
+            {
+                "audio_signal": NeuralType(('B', 'D', 'T'), SpectrogramType()),
+                "length": NeuralType(tuple('B'), LengthsType()),
+                "cache_last_channel": NeuralType(('D', 'B', 'T', 'D'), ChannelType(), optional=True),
+                "cache_last_time": NeuralType(('D', 'B', 'D', 'T'), ChannelType(), optional=True),
+                "cache_last_channel_len": NeuralType(tuple('B'), LengthsType(), optional=True),
+                "bypass_pre_encode": NeuralType(tuple(), BoolType(), optional=True),
+                "output_prepend_global_tokens": NeuralType(tuple(), BoolType(), optional=True),
+            }
+        )
+    
+    @property
+    def output_types(self):
+        """Returns definitions of module output ports."""
+        return OrderedDict(
+            {
+                "outputs": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
+                "encoded_lengths": NeuralType(tuple('B'), LengthsType()),
+                "global_tokens_out": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation(), optional=True),
+                "cache_last_channel_next": NeuralType(('D', 'B', 'T', 'D'), ChannelType(), optional=True),
+                "cache_last_time_next": NeuralType(('D', 'B', 'D', 'T'), ChannelType(), optional=True),
+                "cache_last_channel_next_len": NeuralType(tuple('B'), LengthsType(), optional=True),
+            }
+        )
 
 
 

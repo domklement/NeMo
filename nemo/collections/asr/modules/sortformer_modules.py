@@ -211,6 +211,25 @@ class SortformerModules(NeuralModule, Exportable):
         preds = F.sigmoid(spk_preds)
         return preds
 
+    def forward_speaker_logits(self, hidden_out):
+        """
+        The final layer that outputs speaker probabilities using the Sigmoid activation function.
+
+        Args:
+            hidden_out (torch.Tensor): Tensor containing hidden states from the encoder
+                Shape: (batch_size, n_frames, hidden_dim)
+
+        Returns:
+            preds (torch.Tensor): Tensor containing speaker probabilities computed using
+                the Sigmoid activation function
+                Shape: (batch_size, n_frames, n_spk)
+        """
+        hidden_out = self.dropout(F.relu(hidden_out))
+        hidden_out = self.first_hidden_to_hidden(hidden_out)
+        hidden_out = self.dropout(F.relu(hidden_out))
+        spk_preds = self.single_hidden_to_spks(hidden_out)
+        return spk_preds
+
     def concat_embs(
         self,
         list_of_tensors=List[torch.Tensor],

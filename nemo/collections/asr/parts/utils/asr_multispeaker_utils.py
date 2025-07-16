@@ -180,18 +180,27 @@ def get_pil_targets(labels: torch.Tensor, preds: torch.Tensor, speaker_permutati
     return max_score_permed_labels  # (batch_size, num_speakers, num_classes)
 
 
-def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor, return_perm_inds: bool = False, loss_fn_for_cost_mx_construction = None) -> torch.Tensor:
-    if loss_fn_for_cost_mx_construction is None:
-        preds_t = preds.detach().transpose(1, 2)
-        cost_mxs = -logsigmoid(preds_t).bmm(labels) - logsigmoid(-preds_t).bmm(1-labels)
-    else:
+def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor, return_perm_inds: bool = False, use_bce_for_cost_mx_construction=False, max_n_speakers: int = None, input_is_probs: bool = True) -> torch.Tensor:
+    if use_bce_for_cost_mx_construction:
         cost_mxs = torch.empty((labels.shape[0], labels.shape[-1], labels.shape[-1]), device=labels.device)
         for k in range(labels.shape[0]):
             for i in range(labels.shape[-1]):
                 for j in range(labels.shape[-1]):
-                    cost_mxs[k, i, j] = loss_fn_for_cost_mx_construction(probs=preds[k, :, i].unsqueeze(1).unsqueeze(0), labels=labels[k, :, j].unsqueeze(1).unsqueeze(0))
+                    if input_is_probs:
+                        cost_mxs[k, i, j] = torch.nn.functional.binary_cross_entropy(preds[k, :, i].unsqueeze(1).unsqueeze(0), labels[k, :, j].unsqueeze(1).unsqueeze(0))
+                    else:
+                        cost_mxs[k, i, j] = torch.nn.functional.binary_cross_entropy_with_logits(preds[k, :, i].unsqueeze(1).unsqueeze(0), labels[k, :, j].unsqueeze(1).unsqueeze(0))
+    else:
+        preds_t = preds.detach().transpose(1, 2).double()
+        eps = 1e-8
+        if input_is_probs:
+            cost_mxs = -torch.log(preds_t + eps).bmm(labels.double()) - torch.log(-preds_t + eps).bmm(1-labels.double())
+        else:
+            cost_mxs = -logsigmoid(preds_t).bmm(labels.double()) - logsigmoid(-preds_t).bmm(1-labels.double())
+        
 
-    max_n_speakers = max(n_speakers)
+    if max_n_speakers is None:
+        max_n_speakers = max(n_speakers)
     batch_perm_inds = []
 
     for i, cost_mx in enumerate(cost_mxs.detach().cpu().numpy()):

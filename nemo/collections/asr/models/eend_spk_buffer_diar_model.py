@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MultilabelAveragePrecision
 from tqdm import tqdm
 import torchaudio
+from torch import nn
 
 from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechE2ESpkDiarRandomChunkDataset
 from nemo.collections.asr.data.audio_to_diar_label_lhotse import LhotseAudioToSpeechE2ESpkDiarDataset
@@ -52,6 +53,8 @@ from nemo.core.neural_types import AudioSignal, LengthsType, NeuralType
 from nemo.core.neural_types.elements import ProbsType
 from nemo.utils import logging
 from nemo.collections.asr.losses.pit_wrapper import PITLossWrapper
+from nemo.collections.asr.parts.submodules.conformer_modules import ConformerFeedForward
+from nemo.collections.asr.parts.submodules.multi_head_attention import MultiHeadAttention
 
 __all__ = ['EENDSpkBuffEncLabelModel']
 
@@ -90,6 +93,82 @@ def concat_and_pad(embs: List[torch.Tensor], lengths: List[torch.Tensor]):
         start_indices = end_indices
 
     return output, total_lengths
+
+
+class TALayer(nn.Module):
+    def __init__(self, d_model: int, n_speakers: int, ff_expansion_factor: int = 4, n_heads: int = 4, dropout_att: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None):
+        super().__init__()
+        self.d_model = d_model
+        self.n_speakers = n_speakers
+        self.n_heads = n_heads
+        self.dropout_att = dropout_att
+        self.use_pytorch_sdpa = use_pytorch_sdpa
+        self.use_pytorch_sdpa_backends = use_pytorch_sdpa_backends
+        self.ff_expansion_factor = ff_expansion_factor
+        self.fst_lnorm = nn.LayerNorm(self.d_model)
+        self.snd_lnorm = nn.LayerNorm(self.d_model)
+        self.third_lnorm = nn.LayerNorm(self.d_model)
+        self.ff = ConformerFeedForward(self.d_model, self.d_model*self.ff_expansion_factor, dropout=0.1)
+        self.self_attn = MultiHeadAttention(
+            n_head=self.n_heads,
+            n_feat=self.d_model,
+            dropout_rate=self.dropout_att,
+            use_pytorch_sdpa=self.use_pytorch_sdpa,
+            use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+        )
+        self.cross_attn = MultiHeadAttention(
+            n_head=self.n_heads,
+            n_feat=self.d_model,
+            dropout_rate=self.dropout_att,
+            use_pytorch_sdpa=self.use_pytorch_sdpa,
+            use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+        )
+
+    def forward(self, attr_emb, acoustic_emb, ce_mask):
+        x = self.fst_lnorm(self.self_attn(attr_emb, attr_emb, attr_emb, mask=None) + attr_emb)
+        x = self.snd_lnorm(self.cross_attn(x, acoustic_emb, acoustic_emb, mask=ce_mask) + x)
+        return self.third_lnorm(self.ff(x) + x)
+
+
+class TransformerAttractors(nn.Module):
+    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4):
+        super().__init__()
+        self.d_model = d_model
+        self.n_speakers = n_speakers
+        self.n_ta_layers = n_ta_layers
+
+        self.global_embeddings = nn.Parameter(torch.randn(self.n_speakers + 1, self.d_model))
+        self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
+        self.attractor_proj = nn.Linear(self.d_model, 1)
+        
+    def forward_combiner(self, utt_embedding, alpha=1.0):
+        return alpha * nn.functional.sigmoid(utt_embedding).unsqueeze(1) * self.global_embeddings.unsqueeze(0)
+    
+    def _create_ce_mask(self, emb_seq_lengths):
+        max_length = emb_seq_lengths.max()
+        att_mask = torch.zeros((len(emb_seq_lengths), self.n_speakers + 1, max_length), dtype=torch.bool, device=emb_seq_lengths.device)
+        for i, length in enumerate(emb_seq_lengths):
+            att_mask[i, :, length:] = True
+        return att_mask
+
+    def forward(self, utt_embed, emb_seq, emb_seq_lengths):
+        """
+        Args:
+            utt_embed: (batch_size, d_model)
+            emb_seq: (batch_size, n_frames, d_model)
+            emb_seq_lengths: (batch_size,)
+
+        Returns:
+            emb_seq: (batch_size, n_frames, d_model)
+            att_logits: (batch_size, n_frames, n_speakers + 1)
+        """
+        ce_mask = self._create_ce_mask(emb_seq_lengths)
+        combined_utt_embs = self.forward_combiner(utt_embed)
+
+        for _, layer in enumerate(self.ta_layers):
+            combined_utt_embs = layer(combined_utt_embs, emb_seq, ce_mask)
+
+        return combined_utt_embs, self.attractor_proj(combined_utt_embs)
 
 
 class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
@@ -143,11 +222,6 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             self.spec_augmentation = None
 
         self.encoder = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.encoder).to(self.device)
-        self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
-            self.device
-        )
-        self.sortformer_modules.hidden_to_spks = None
-        self.sortformer_modules.encoder_proj = None
         
         self._init_loss_weights()
 
@@ -170,14 +244,36 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.save_predictions = self._cfg.get("save_predictions", False)
         self.max_num_of_spks = self._cfg.get("max_num_of_spks", 4)
         self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
+        self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
+
+        if self.use_transformer_attractors:
+            self.transformer_attractors = TransformerAttractors(
+                d_model=self._cfg.model_defaults.d_model,
+                n_speakers=self.max_num_of_spks,
+                n_ta_layers=4,
+                n_heads=4,
+                dropout_att=0.0,
+            )
+
+        else:
+            self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
+                self.device
+            )
+            self.sortformer_modules.hidden_to_spks = None
+            self.sortformer_modules.encoder_proj = None
+
 
     def _init_loss_weights(self):
         pil_weight = self._cfg.get("pil_weight", 0.0)
         ats_weight = self._cfg.get("ats_weight", 1.0)
+        attr_weight = self._cfg.get("attr_loss_weight", 0.0)
+
         if pil_weight + ats_weight == 0:
             raise ValueError(f"weights for PIL {pil_weight} and ATS {ats_weight} cannot sum to 0")
-        self.pil_weight = pil_weight / (pil_weight + ats_weight)
-        self.ats_weight = ats_weight / (pil_weight + ats_weight)
+        
+        self.pil_weight = pil_weight / (pil_weight + ats_weight + attr_weight)
+        self.ats_weight = ats_weight / (pil_weight + ats_weight + attr_weight)
+        self.attr_weight = attr_weight / (pil_weight + ats_weight + attr_weight)
 
     def _init_eval_metrics(self):
         """
@@ -316,15 +412,16 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         # Spec augment is not applied during evaluation/testing
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-        emb_seq, emb_seq_length = self.encoder(
+        emb_seq, emb_seq_length, global_tokens = self.encoder(
             audio_signal=processed_signal,
             length=processed_signal_length,
             bypass_pre_encode=bypass_pre_encode,
+            output_prepend_global_tokens=True,
         )
         emb_seq = emb_seq.transpose(1, 2)
-        if self.sortformer_modules.encoder_proj is not None:
+        if hasattr(self, 'sortformer_modules') and self.sortformer_modules.encoder_proj is not None:
             emb_seq = self.sortformer_modules.encoder_proj(emb_seq)
-        return emb_seq, emb_seq_length
+        return emb_seq, emb_seq_length, global_tokens
 
     def forward_infer(self, emb_seq, emb_seq_length):
         """
@@ -340,8 +437,16 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             preds (torch.Tensor): Sorted tensor containing Sigmoid values for predicted speaker labels.
                 Shape: (batch_size, diar_frame_count, num_speakers)
         """
-        preds = self.sortformer_modules.forward_speaker_sigmoids(emb_seq)
-        return preds
+        logits = self.sortformer_modules.forward_speaker_logits(emb_seq)
+        return logits
+    
+    def forward_infer_transformer_attractors(self, global_tokens, emb_seq, emb_seq_length):
+        """
+        """
+        attractors, attr_logits = self.transformer_attractors(global_tokens[:, 0, :], emb_seq, emb_seq_length)
+        attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
+        logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
+        return logits, attractors, attr_logits
 
     def _diarize_forward(self, batch: Any):
         """
@@ -559,13 +664,23 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         )
         processed_signal = processed_signal[:, :, : processed_signal_length.max()]
         if self.streaming_mode:
-            preds = self.forward_streaming(processed_signal, processed_signal_length)
+            raise NotImplementedError("Streaming mode is not implemented for TransformerAttractors")
+            # preds = self.forward_streaming(processed_signal, processed_signal_length)
         else:
-            emb_seq, emb_seq_length = self.frontend_encoder(
+            emb_seq, emb_seq_length, global_tokens = self.frontend_encoder(
                 processed_signal=processed_signal, processed_signal_length=processed_signal_length
             )
-            preds = self.forward_infer(emb_seq, emb_seq_length)
-        return preds
+
+            attractors = None
+            attr_logits = None
+            if self.use_transformer_attractors:
+                # preds are logits here!
+                preds, attractors, attr_logits = self.forward_infer_transformer_attractors(global_tokens, emb_seq, emb_seq_length)
+            else:
+                # preds are logits here as well now!
+                preds = self.forward_infer(emb_seq, emb_seq_length)
+
+        return preds, attractors, attr_logits
 
     @property
     def input_names(self):
@@ -827,7 +942,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
         return streaming_state, total_preds
 
-    def _get_aux_train_evaluations(self, preds, targets, target_lens) -> dict:
+    def _get_aux_train_evaluations(self, preds, targets, target_lens, attr_logits=None) -> dict:
         """
         Compute auxiliary training evaluations including losses and metrics.
 
@@ -846,31 +961,21 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         Returns:
             (dict): A dictionary containing the following training metrics.
         """
-        # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        if self.force_first_k_streams_to_be_active:
-            n_speakers = (targets.sum(1) > 0).sum(-1)
-        else:
-            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
+        n_speakers, targets_pil, perm_inds = self._get_permuted_labels(preds, targets, target_lens)
 
-        if self.use_bce_for_hungarian:
-            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True, loss_fn_for_cost_mx_construction=partial(self.loss, target_lens=target_lens))
-        else:
-            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True)
+        loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
 
-        pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
-        loss = self.pil_weight * pil_loss
-
-        self._accuracy_train(preds, targets_pil, target_lens)
+        self._accuracy_train(torch.nn.functional.sigmoid(preds), targets_pil, target_lens)
         train_f1_acc, train_precision, train_recall = self._accuracy_train.compute()
 
         train_metrics = {
-            'loss/loss': loss,
-            'loss/pil_loss': pil_loss,
             'trainer/learning_rate': self._optimizer.param_groups[0]['lr'],
             'train_metrics/f1_acc': train_f1_acc,
             'train_metrics/precision': train_precision,
             'train_metrics/recall': train_recall,
         }
+        for k in loss.keys():
+            train_metrics[f'loss/{k}'] = loss[k]
         return train_metrics
 
     def training_step(self, batch: list, batch_idx: int) -> dict:
@@ -890,17 +995,96 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         """
         audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
 
-        preds = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
+        preds, attractors, attr_logits = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
-            train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens)
+            train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
 
         train_metrics['stats/perc_silence'] = ((targets > 0)[0].sum(-1) == 0).float().mean()
 
         self._reset_train_metrics()
         self.log_dict(train_metrics, sync_dist=True, on_step=True, on_epoch=False, logger=True)
         return {'loss': train_metrics['loss/loss']}
+    
+    def _get_permuted_labels(self, preds, targets, target_lens):
+        if self.force_first_k_streams_to_be_active or self.use_transformer_attractors:
+            n_speakers = (targets.sum(1) > 0).sum(-1)
+        else:
+            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
 
-    def _get_aux_validation_evaluations(self, preds, targets, target_lens, uniq_ids) -> dict:
+        if self.use_bce_for_hungarian:
+            targets_pil, perm_inds = get_pil_targets_hungarian(labels=targets.clone(), 
+                                                               preds=preds, 
+                                                               n_speakers=n_speakers, 
+                                                               return_perm_inds=True, 
+                                                               use_bce_for_cost_mx_construction=self.use_bce_for_hungarian,
+                                                               max_n_speakers=self.max_num_of_spks if self.use_transformer_attractors else None, 
+                                                               input_is_probs=False)
+        else:
+            targets_pil, perm_inds = get_pil_targets_hungarian(labels=targets.clone(), 
+                                                               preds=preds, 
+                                                               n_speakers=n_speakers, 
+                                                               return_perm_inds=True, 
+                                                               use_bce_for_cost_mx_construction=self.use_bce_for_hungarian,
+                                                               max_n_speakers=self.max_num_of_spks if self.use_transformer_attractors else None, 
+                                                               input_is_probs=False)
+
+        return n_speakers, targets_pil, perm_inds
+    
+    def compute_loss(self, preds, targets_pil, target_lens, attr_logits=None):
+        if self.use_transformer_attractors:
+            if attr_logits is None:
+                raise ValueError("attr_probs is required when use_transformer_attractors is True")
+
+            max_num_spks = 0
+            for i in range(targets_pil.shape[0]):
+                n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
+                targets_pil[i, :, n_speakers:] = -1
+                max_num_spks = max(max_num_spks, n_speakers)
+
+            logits_list = [preds[k, : target_lens[k], :] for k in range(preds.shape[0])]
+            targets_list = [targets_pil[k, : target_lens[k], :] for k in range(targets_pil.shape[0])]
+            logits = torch.cat(logits_list, dim=0)
+            labels = torch.cat(targets_list, dim=0)
+
+            # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
+            loss[torch.where(labels == -1)] = 0
+            loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
+            loss[max_num_spks:] = 0
+
+            loss = loss.mean()
+
+            attr_labels = torch.ones_like(attr_logits)
+            for i in range(targets_pil.shape[0]):
+                n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
+                attr_labels[i, n_speakers:, :] = 0
+            attr_loss = nn.functional.binary_cross_entropy_with_logits(attr_logits, attr_labels)
+
+            return {
+                'loss': self.pil_weight * loss + self.attr_weight * attr_loss,
+                'diar_loss': loss,
+                'attr_loss': attr_loss,
+            }
+        else:
+            # loss = self.loss(logits=preds, labels=targets_pil, target_lens=target_lens)
+            logits_list = [preds[k, : target_lens[k], :] for k in range(preds.shape[0])]
+            targets_list = [targets_pil[k, : target_lens[k], :] for k in range(targets_pil.shape[0])]
+            logits = torch.cat(logits_list, dim=0)
+            labels = torch.cat(targets_list, dim=0)
+
+            # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
+            loss[torch.where(labels == -1)] = 0
+            loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
+
+            loss = loss.mean()
+            return {
+                'loss': loss,
+                'diar_loss': loss,
+            }
+
+
+    def _get_aux_validation_evaluations(self, preds, targets, target_lens, uniq_ids, attr_logits=None) -> dict:
         """
         Compute auxiliary validation evaluations including losses and metrics.
 
@@ -919,17 +1103,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         Returns:
             val_metrics (dict): A dictionary containing the following validation metrics
         """
-        # targets_ats = get_ats_targets(targets.clone(), preds, speaker_permutations=self.speaker_permutations)
-        if self.force_first_k_streams_to_be_active:
-            n_speakers = (targets.sum(1) > 0).sum(-1)
-        else:
-            n_speakers = torch.ones((targets.shape[0], ), device=targets.device) * self.max_num_of_spks
-
-        if self.use_bce_for_hungarian:
-            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True, loss_fn_for_cost_mx_construction=partial(self.loss, target_lens=target_lens))
-        else:
-            targets_pil, perm_inds = get_pil_targets_hungarian(targets.clone(), preds, n_speakers=n_speakers, return_perm_inds=True)
-        # losses, perm_inds2 = self.pit_loss_wrapper(preds.transpose(-1, -2), targets.transpose(-1,-2), target_lens=target_lens, return_est=True)
+        n_speakers, targets_pil, perm_inds = self._get_permuted_labels(preds, targets, target_lens)
 
         if self.save_predictions:
             if not hasattr(self, 'pred_num'):
@@ -948,32 +1122,21 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 output[:, 1::2] = preds[i].detach().cpu() # Odd indices get tensor b
                 torchaudio.save(save_path, output.T.float(), sample_rate=16000, format="wav", encoding="PCM_F")
 
-                # os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                # torch.save(preds[i][:target_lens[i]].detach().cpu(), save_path)
-                # torch.save(targets_pil[i][:target_lens[i]].detach().cpu(), save_path.replace('_preds.pt', '_targets.pt'))
+        loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
 
-        # val_ats_loss = self.loss(probs=preds, labels=targets_ats, target_lens=target_lens)
-        val_pil_loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
-        val_loss = self.pil_weight * val_pil_loss
-
-        self._accuracy_valid(preds, targets_pil, target_lens)
+        self._accuracy_valid(torch.nn.functional.sigmoid(preds), targets_pil, target_lens)
         val_f1_acc, val_precision, val_recall = self._accuracy_valid.compute()
 
-        # self._accuracy_valid_ats(preds, targets_ats, target_lens)
-        # valid_f1_acc_ats, _, _ = self._accuracy_valid_ats.compute()
-
         self._accuracy_valid.reset()
-        # self._accuracy_valid_ats.reset()
 
         val_metrics = {
-            'val_loss/loss': val_loss,
-            # 'val_ats_loss': val_ats_loss,
-            'val_loss/pil_loss': val_pil_loss,
             'val_metrics/f1_acc': val_f1_acc,
             'val_metrics/precision': val_precision,
             'val_metrics/recall': val_recall,
-            # 'val_f1_acc_ats': valid_f1_acc_ats,
         }
+        for k in loss.keys():
+            val_metrics[f'val_loss/{k}'] = loss[k]
+
         return val_metrics
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
@@ -998,13 +1161,27 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             dict: A dictionary containing various validation metrics for this batch.
         """
         audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
-        preds = self.forward(
+        preds, attractors, attr_logits = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
         )
+
+        if self.use_transformer_attractors:
+            # We need to estimate the number of speakers for each utterance.
+            # The only thing we need to do is to zero out the logits for the inactive speakers.
+            attr_probs = torch.sigmoid(attr_logits)
+            for i in range(attr_probs.shape[0]):
+                n_speakers = torch.where(attr_probs[i] < .5)[0]
+                if not n_speakers.numel():
+                    n_speakers = self.max_num_of_spks
+                else:
+                    n_speakers = n_speakers[0]
+                
+                preds[i, :, n_speakers:] = -10
+
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
-            val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens, uniq_ids)
-            self._der_valid.update(preds, targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
+            val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens, uniq_ids, attr_logits=attr_logits)
+            self._der_valid.update(torch.nn.functional.sigmoid(preds), targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
         if isinstance(self.trainer.val_dataloaders, list) and len(self.trainer.val_dataloaders) > 1:
             self.validation_step_outputs[dataloader_idx].append(val_metrics)
         else:
@@ -1018,7 +1195,9 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
         val_loss_mean = torch.stack([x['val_loss/loss'] for x in outputs]).mean()
         # val_ats_loss_mean = torch.stack([x['val_ats_loss'] for x in outputs]).mean()
-        val_pil_loss_mean = torch.stack([x['val_loss/pil_loss'] for x in outputs]).mean()
+        val_pil_loss_mean = torch.stack([x['val_loss/diar_loss'] for x in outputs]).mean()
+        if self.use_transformer_attractors:
+            val_attr_loss_mean = torch.stack([x['val_loss/attr_loss'] for x in outputs]).mean()
         val_f1_acc_mean = torch.stack([x['val_metrics/f1_acc'] for x in outputs]).mean()
         val_precision_mean = torch.stack([x['val_metrics/precision'] for x in outputs]).mean()
         val_recall_mean = torch.stack([x['val_metrics/recall'] for x in outputs]).mean()
@@ -1029,12 +1208,13 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         multi_val_metrics = {
             'val_loss/loss': val_loss_mean,
             # 'val_ats_loss': val_ats_loss_mean,
-            'val_loss/pil_loss': val_pil_loss_mean,
+            'val_loss/diar_loss': val_pil_loss_mean,
             'val_metrics/f1_acc': val_f1_acc_mean,
             'val_metrics/precision': val_precision_mean,
             'val_metrics/recall': val_recall_mean,
-            # 'val_f1_acc_ats': val_f1_acc_ats_mean,
         }
+        if self.use_transformer_attractors:
+            multi_val_metrics['val_loss/attr_loss'] = val_attr_loss_mean
         return {'log': multi_val_metrics}
 
     def _get_aux_test_batch_evaluations(self, batch_idx: int, preds, targets, target_lens):
@@ -1283,11 +1463,11 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
         param_groups = [
             {
-                "params": learnable_vectors_group, "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100)
+                "params": other_group
             },
             {
-                "params": other_group
-            }
+                "params": learnable_vectors_group, "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100)
+            },
         ]
 
         if "optim_param_groups" in self.cfg:
