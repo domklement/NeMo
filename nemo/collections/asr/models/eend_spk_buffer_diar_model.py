@@ -131,7 +131,7 @@ class TALayer(nn.Module):
 
 
 class TransformerAttractors(nn.Module):
-    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4):
+    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.02):
         super().__init__()
         self.d_model = d_model
         self.n_speakers = n_speakers
@@ -141,9 +141,11 @@ class TransformerAttractors(nn.Module):
         self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
         self.attractor_proj = nn.Linear(self.d_model, 1)
 
-        for n, p in self.named_parameters():
-            if 'norm' not in n:
-                p.data = p.data * 0.02
+        # for n, p in self.named_parameters():
+        #     if 'norm' not in n:
+        #         p.data = p.data * ta_weights_init_constant
+
+        self.ta_layers[-1].third_lnorm.weight.data = self.ta_layers[-1].third_lnorm.weight.data * ta_weights_init_constant
 
         
     def forward_combiner(self, utt_embedding, alpha=1.0):
@@ -250,6 +252,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.max_num_of_spks = self._cfg.get("max_num_of_spks", 4)
         self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
         self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
+        self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -258,9 +261,10 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 n_ta_layers=4,
                 n_heads=4,
                 dropout_att=0.0,
+                ta_weights_init_constant=self.ta_weights_init_constant,
             )
-            self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
-            self.emb_seq_ln.weight.data = self.emb_seq_ln.weight.data * 0.02
+            # self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
+            # self.emb_seq_ln.weight.data = self.emb_seq_ln.weight.data * self.ta_weights_init_constant
 
         else:
             self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
@@ -448,11 +452,9 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         return logits
     
     def forward_infer_transformer_attractors(self, global_tokens, emb_seq, emb_seq_length):
-        """
-        """
         attractors, attr_logits = self.transformer_attractors(global_tokens[:, 0, :], emb_seq, emb_seq_length)
         attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
-        logits = torch.bmm(self.emb_seq_ln(emb_seq), attractors.transpose(-1,-2))
+        logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
         return logits, attractors, attr_logits
 
     def _diarize_forward(self, batch: Any):
@@ -1458,24 +1460,47 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             self._optimizer_param_groups = None
             return
 
+        def get_all_module_names_of_type(module, instance, name_prefix=''):
+            if isinstance(module, instance):
+                return [name_prefix]
+
+            res = []
+            for n, ch in module.named_children():
+                new_prefix = f'{name_prefix}.{n}' if name_prefix else n
+                res.extend(get_all_module_names_of_type(ch, instance, new_prefix))
+
+            return res
+
         known_groups = []
         param_groups = []
+        
+        layer_norm_names = set(get_all_module_names_of_type(self, nn.LayerNorm))
+        embed_names = set(get_all_module_names_of_type(self, nn.Embedding))
 
         learnable_vectors_group = []
-        other_group = []
+        other_group_no_decay = []
+        other_group_decay = []
         for n, p in self.named_parameters():
             if '.spk_buffer.' in n or 'extra_global_tokens' in n:
                 print('LEARNABLE VECTOR:', n)
                 learnable_vectors_group.append(p)
+            elif n in layer_norm_names or n in embed_names:
+                other_group_no_decay.append(p)
             else:
-                other_group.append(p)
+                other_group_decay.append(p)
 
         param_groups = [
             {
-                "params": other_group
+                "params": other_group_decay,
             },
             {
-                "params": learnable_vectors_group, "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100)
+                "params": other_group_no_decay,
+                "weight_decay": 0.0
+            },
+            {
+                "params": learnable_vectors_group, 
+                "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100),
+                "weight_decay": 0.0
             },
         ]
 
