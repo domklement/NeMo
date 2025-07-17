@@ -25,6 +25,7 @@ def split_rttm_by_utterance(input_rttm_path, output_dir, output_scp_path):
                 continue  # skip malformed lines
 
             utt_id = parts[1]  # RTTM format: <type> <file-id> ...
+            utt_id = utt_id.replace('/', '__')
             if utt_id not in utterance_map:
                 utterance_map[utt_id] = []
             utterance_map[utt_id].append(line)

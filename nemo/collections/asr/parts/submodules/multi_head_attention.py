@@ -851,7 +851,7 @@ class RelPositionMultiHeadAttentionLongformer(RelPositionMultiHeadAttention):
         chunk_stride[1] = chunk_stride[1] // 2
         return x.as_strided(size=chunk_size, stride=chunk_stride)
 
-    # @lru_cache()
+    @lru_cache()
     def _get_invalid_locations_mask(self, w: int, device: str):
 
         diagonals_list = []

@@ -1008,7 +1008,12 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
 
-        train_metrics['stats/perc_silence'] = ((targets > 0)[0].sum(-1) == 0).float().mean()
+        total_silence = 0
+        total_length = 0
+        for i in range(targets.shape[0]):
+            total_silence += ((targets[i][:target_lens[i]] > 0).sum(-1) == 0).sum()
+            total_length += target_lens[i]
+        train_metrics['stats/perc_silence'] = total_silence / total_length
         train_metrics['stats/min_logit'] = preds.min()
         train_metrics['stats/max_logit'] = preds.max()
 
