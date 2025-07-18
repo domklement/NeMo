@@ -55,6 +55,12 @@ def split_monocut_at_pauses(
 
     if not monocut.supervisions or not monocut.supervisions[0].alignment:
         # No alignment info, return original cut
+        if DROP_WITHOUT_ALIGN:
+            return []
+        else:
+            return [monocut]
+
+    elif pause_threshold is None:
         return [monocut]
 
     supervision = monocut.supervisions[0]
@@ -139,6 +145,7 @@ def split_monocut_at_pauses(
             final_segment_end_time
         ))
 
+
     # If no splits were made, return original
     if not split_points:
         return [monocut]
@@ -147,6 +154,7 @@ def split_monocut_at_pauses(
     result_cuts = []
     for seg_idx, (start_word_idx, end_word_idx, segment_start, segment_end) in enumerate(segment_boundaries):
         segment_words = valid_alignments[start_word_idx:end_word_idx + 1]
+
 
         if not segment_words:
             continue
@@ -192,6 +200,7 @@ def split_monocut_at_pauses(
             recording=monocut.recording,
             custom=monocut.custom,
         )
+
         result_cuts.append(new_cut)
 
     return result_cuts
@@ -213,19 +222,17 @@ def split_monocuts_batch(
     helper_func = partial(split_monocut_at_pauses, pause_threshold=pause_threshold)
     n_monocuts = len(monocuts)
     monocuts = iter(monocuts)
-    # for elem in tqdm(parallel_map(helper_func, monocuts, num_jobs=num_jobs),
-    #     total=n_monocuts,
-    #     desc="Splitting cuts using forced alignment",
-    # ):
-    #     result.extend(elem)
-    for c in tqdm(monocuts, total=n_monocuts, desc="Splitting cuts using forced alignment"):
-        result.extend(helper_func(c))
-    return CutSet(result)
+    for elem in tqdm(parallel_map(helper_func, monocuts, num_jobs=num_jobs),
+        total=n_monocuts,
+        desc="Splitting cuts using forced alignment",
+    ):
+        result.extend(elem)
+    return lhotse.CutSet(result)
 
 if __name__ == "__main__":
     import sys
 
-    SPLIT_FA_FACTOR = 0.1
+    SPLIT_FA_FACTOR = 1.0
     N_JOBs = 64
 
     all_cuts = lhotse.load_manifest(sys.argv[1])

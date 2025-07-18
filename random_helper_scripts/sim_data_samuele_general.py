@@ -6,24 +6,18 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+from copy import deepcopy
 import lhotse
 import numpy as np
 import pyroomacoustics
 import scipy.signal
 import soundfile as sf
-import torch
-import torchaudio
-from fontTools.merge.util import current_time
 from lhotse import (
     AudioSource,
-    CutSet,
     MonoCut,
     Recording,
     RecordingSet,
-    SupervisionSegment,
     SupervisionSet,
-    dill_enabled,
 )
 from lhotse.cut import CutSet, MixedCut, MixTrack
 from lhotse.cut.set import mix
@@ -32,12 +26,6 @@ from lhotse.parallel import parallel_map
 from lhotse.recipes.librispeech import prepare_librispeech
 from lhotse.supervision import AlignmentItem, SupervisionSegment
 from lhotse.utils import add_durations, uuid4
-from lhotse.workflows.meeting_simulation.base import (
-    MAX_TASKS_WAITING,
-    BaseMeetingSimulator,
-    MeetingSampler,
-    reverberate_cuts,
-)
 from scipy.signal import fftconvolve, firwin
 from tqdm import tqdm
 
@@ -53,201 +41,25 @@ SPEED_PERTURB_HIGH = 1.05
 # irrealistic RIR differences.
 # rir sim parameters here
 # each session will be in a single room.
-# speaker position may change
-RT60 = (0.1, 0.6)
-ROOM_SZ = (5, 20)
-ROOM_CEILING = (3, 6)
+# note that speaker position may change.
+
+RT60 = (0.1, 0.4)
+ROOM_SZ = (5, 10)
+ROOM_CEILING = (3, 5)
 DELTA_DIST = 0.5  # min distance between walls and among speakers
-RAN_DISP = 0.05
+RAN_DISP = 0.05 # better probably to disable for multi channel
+BASE_GAIN = (-35, -8)
+REL_GAIN = (-12, +5)
 
+SAVE_SPK = False # it will save the reverberated signal.
+# do we want to save also the dry signal ? helpful to chyiu jiunn probably.
+# but then we need to align and also use fftconvolve on the dry.
 
-def split_monocut_at_pauses(
-        monocut: MonoCut, pause_threshold: float = 0.2
-) -> List[MonoCut]:
-    """
-    Split a MonoCut at pauses longer than the specified threshold while preserving alignments.
-
-    When splitting at gaps:
-    - The previous segment ends at gap_start + gap_duration/2
-    - The next segment starts at gap_start + gap_duration/2
-    - Leading silence longer than threshold creates a separate silent segment
-    - Trailing silence longer than threshold creates a separate silent segment
-    - For gaps shorter than threshold, segments include the full gap
-
-    Args:
-        monocut: The MonoCut to split
-        pause_threshold: Minimum pause duration in seconds to split at (default: 0.2s = 200ms)
-
-    Returns:
-        List of MonoCut objects split at long pauses
-    """
-
-    if not monocut.supervisions or not monocut.supervisions[0].alignment:
-        # No alignment info, return original cut
-        return [monocut]
-
-    supervision = monocut.supervisions[0]
-    word_alignments = supervision.alignment["word"]
-
-    # Filter out empty symbols upfront
-    valid_alignments = [item for item in word_alignments if item.symbol.strip() != ""]
-
-    if len(valid_alignments) == 0:
-        return [monocut]  # No valid words, return original
-
-    # Check for leading silence
-    first_word = valid_alignments[0]
-    leading_silence = first_word.start - monocut.start
-
-    # Check for trailing silence
-    last_word = valid_alignments[-1]
-    last_word_end = last_word.start + last_word.duration
-    monocut_end = monocut.start + monocut.duration
-    trailing_silence = monocut_end - last_word_end
-
-    # Find all potential split points (including leading/trailing silence)
-    split_points = []
-    segment_boundaries = []  # (start_word_idx, end_word_idx, segment_start_time, segment_end_time)
-
-    # Handle leading silence
-    current_segment_start_time = monocut.start
-    current_word_start_idx = 0
-
-    if leading_silence >= pause_threshold:
-        # Leading silence gets split in the middle
-        split_time = monocut.start + leading_silence / 2
-        split_points.append(split_time)
-        current_segment_start_time = split_time
-
-    # Find gaps between words that exceed threshold
-    for i in range(len(valid_alignments) - 1):
-        current_item = valid_alignments[i]
-        next_item = valid_alignments[i + 1]
-
-        current_end = current_item.start + current_item.duration
-        gap_start = current_end
-        gap_end = next_item.start
-        gap_duration = gap_end - gap_start
-
-        if gap_duration >= pause_threshold:
-            # End current segment at middle of gap
-            split_time = gap_start + gap_duration / 2
-
-            # Add current segment
-            segment_boundaries.append((
-                current_word_start_idx,
-                i,  # end at current word (inclusive)
-                current_segment_start_time,
-                split_time
-            ))
-
-            # Start new segment at same split point
-            current_segment_start_time = split_time
-            current_word_start_idx = i + 1
-            split_points.append(split_time)
-
-    # Handle the final segment
-    final_segment_end_time = monocut_end
-    if trailing_silence >= pause_threshold:
-        # Split trailing silence in the middle
-        split_time = last_word_end + trailing_silence / 2
-        # End the words segment at the split
-        segment_boundaries.append((
-            current_word_start_idx,
-            len(valid_alignments) - 1,
-            current_segment_start_time,
-            split_time
-        ))
-        split_points.append(split_time)
-    else:
-        # Include trailing silence in the final segment
-        segment_boundaries.append((
-            current_word_start_idx,
-            len(valid_alignments) - 1,
-            current_segment_start_time,
-            final_segment_end_time
-        ))
-
-    # If no splits were made, return original
-    if not split_points:
-        return [monocut]
-
-    # Create new MonoCuts for each segment
-    result_cuts = []
-    for seg_idx, (start_word_idx, end_word_idx, segment_start, segment_end) in enumerate(segment_boundaries):
-        segment_words = valid_alignments[start_word_idx:end_word_idx + 1]
-
-        if not segment_words:
-            continue
-
-        segment_duration = segment_end - segment_start
-
-        # Adjust alignment times to be relative to segment start
-        adjusted_alignments = []
-        for item in segment_words:
-            adjusted_item = AlignmentItem(
-                symbol=item.symbol,
-                start=item.start - segment_start,
-                duration=item.duration,
-                score=item.score,
-            )
-            adjusted_alignments.append(adjusted_item)
-
-        # Create segment text
-        segment_text = " ".join(item.symbol for item in segment_words)
-
-        # Create new supervision with adjusted alignments
-        new_supervision = SupervisionSegment(
-            id=f"{supervision.id}-{seg_idx:03d}",
-            recording_id=supervision.recording_id,
-            start=0,  # Relative to the new cut
-            duration=segment_duration,
-            channel=supervision.channel,
-            text=segment_text,
-            language=supervision.language,
-            speaker=supervision.speaker,
-            gender=supervision.gender,
-            custom=supervision.custom,
-            alignment={"word": adjusted_alignments},
-        )
-
-        # Create new MonoCut
-        new_cut = MonoCut(
-            id=f"{monocut.id}-{seg_idx:03d}",
-            start=segment_start,
-            duration=segment_duration,
-            channel=monocut.channel,
-            supervisions=[new_supervision],
-            recording=monocut.recording,
-            custom=monocut.custom,
-        )
-        result_cuts.append(new_cut)
-
-    return result_cuts
-
-def split_monocuts_batch(
-    monocuts: List[MonoCut], pause_threshold: float = 0.2, num_jobs: int = 1
-) -> List[MonoCut]:
-    """
-    Split a list of MonoCuts at pauses longer than the specified threshold.
-
-    Args:
-        monocuts: List of MonoCuts to split
-        pause_threshold: Minimum pause duration in seconds to split at (default: 0.2s = 200ms)
-
-    Returns:
-        List of all resulting MonoCut objects
-    """
-    result = []
-    helper_func = partial(split_monocut_at_pauses, pause_threshold=pause_threshold)
-    n_monocuts = len(monocuts)
-    monocuts = iter(monocuts)
-    for elem in tqdm(parallel_map(helper_func, monocuts, num_jobs=num_jobs),
-        total=n_monocuts,
-        desc="Splitting cuts using forced alignment",
-    ):
-        result.extend(elem)
-    return lhotse.CutSet(result)
+MULTICHANNEL = False #TODO need also to estimate the direct path probably.
+ADD_NOISE = False
+SAVE_CUTSET = False
+DROP_WITHOUT_ALIGN = True
+REVERBERATE = True
 
 
 class TransitionType(Enum):
@@ -263,8 +75,8 @@ class TransitionType(Enum):
 class TransitionParams:
     """Parameters for each transition type"""
 
-    beta_th: float = 0.57  # Expected pause duration for turn-hold
-    beta_ts: float = 0.40  # Expected gap duration for turn-switch
+    beta_th: float = 0.77  # Expected pause duration for turn-hold
+    beta_ts: float = 0.60  # Expected gap duration for turn-switch
     beta_ir: float = 0.44  # Expected overlap ratio for interruption
     beta_bc: float = 0.67  # Expected overlap ratio for backchannel # not used now
 
@@ -308,6 +120,8 @@ class ConversationalMeetingSimulator:
         target_duration=120,
         min_max_spk=(2, 11),
         rirs=None,
+        save_spk=False,
+        add_noise=False
     ):
         super().__init__()
         self.output_dir = output_dir
@@ -319,6 +133,8 @@ class ConversationalMeetingSimulator:
         self.target_duration = target_duration
         self.min_max_spk = min_max_spk
         self.rirs = rirs
+        self.save_spk = save_spk
+        self.add_noise = add_noise
 
         # map speakers to cuts
         logger.info("Filtering source Cuts: removing too short or too long.")
@@ -394,7 +210,7 @@ class ConversationalMeetingSimulator:
                 fs=samplerate,
                 max_order=max_order,
                 materials=pyroomacoustics.Material(e_absorption),
-                use_rand_ism=True,
+                use_rand_ism=False,
                 max_rand_disp=RAN_DISP,
             )
             break
@@ -465,34 +281,24 @@ class ConversationalMeetingSimulator:
         ratio = np.random.exponential(beta)
         return np.clip(ratio, self.epsilon, 1.0 - self.epsilon)
 
-    def get_offset(self, current_cut, prev_cut, prev_offset, transition_type):
+    def get_offset(self, prev_cut, prev_offset, prev_offset_spk, transition_type):
 
-        next_duration = current_cut.duration
         prev_duration = prev_cut.duration
-
-        # if (
-        #    transition_type == TransitionType.BACKCHANNEL
-        #    and not next_duration <= prev_duration
-        # ):
-        # override as we cannot back-channel in this instance.
-        # with FA data this should not be too frequent, but yeah will
-        # reduce back-channels.
-        #    transition_type = TransitionType.INTERRUPTION
 
         if transition_type == TransitionType.TURN_HOLD:
             pause_duration = self.sample_exponential_duration(self.params.beta_th)
-            return prev_offset + prev_cut.duration + pause_duration
+            return max(prev_offset + prev_cut.duration + pause_duration, prev_offset_spk)
 
         elif transition_type == TransitionType.TURN_SWITCH:
             pause_duration = self.sample_exponential_duration(self.params.beta_ts)
-            return prev_offset + prev_cut.duration + pause_duration
+            return max(prev_offset + prev_cut.duration + pause_duration, prev_offset_spk)
 
         elif transition_type == TransitionType.INTERRUPTION:
             overlap_ratio = self.sample_overlap_ratio(self.params.beta_ir)
             overlap_duration = overlap_ratio * prev_duration
             # start_offset = np.random.uniform(0, prev_duration)
 
-            return prev_offset + prev_cut.duration - overlap_duration
+            return max(prev_offset + prev_cut.duration - overlap_duration, prev_offset_spk)
 
         elif transition_type == TransitionType.BACKCHANNEL:
 
@@ -500,7 +306,7 @@ class ConversationalMeetingSimulator:
             start_offset = np.random.uniform(0, prev_duration)
             # start_offset = overlap_ratio * prev_duration
 
-            return prev_offset + prev_cut.duration - start_offset
+            return max(prev_offset + prev_cut.duration - start_offset, prev_offset_spk)
 
     def select_transition_type(
         self, prev_transition: Optional[TransitionType] = None
@@ -612,7 +418,7 @@ class ConversationalMeetingSimulator:
 
         return normalized_audio
 
-    def gen_audio(self, cutsets):
+    def gen_audio(self, indx):
 
         n_speakers = np.random.randint(*self.min_max_spk)
         target_dur = self.target_duration
@@ -624,13 +430,13 @@ class ConversationalMeetingSimulator:
         prev_cut = None
         prev_speaker = None
         seen_speakers = set()
+        prev_offset_spk = {}
 
         utterances = []
         offsets = []
 
-        # return [None], [None]
-
-        fir_highpass = self.create_fir_highpass(60, 63)
+        # this is tuned to librispeech
+        fir_highpass = self.create_fir_highpass(40, 63)
 
         if self.rirs is not None:
             c_room_rirs = self.rirs[np.random.randint(0, len(self.rirs))]
@@ -655,82 +461,88 @@ class ConversationalMeetingSimulator:
 
             cut = np.random.choice(self.spk2cuts[current_speaker])
 
-            # Load audio
+            # Load audio # optionally perturb speed here ? I think it is faster with torchaudio.
             # if self.speed_perturb:
             # keep these fixed
             #    factor = np.random.uniform(SPEED_PERTURB_LOW, SPEED_PERTURB_HIGH)
             #    cut = cut.perturb_speed(factor)
             # if self.rirs is not None:
-            #   cut = cut.reverb_rir(np.random.choice(c_room_rirs))
+            #  cut = cut.reverb_rir(np.random.choice(c_room_rirs))
+            c_spk = cut.supervisions[0].speaker
 
             if utt_indx == 0:
                 offsets.append(0.0)
                 utterances.append(cut)
             else:
-                c_offset = self.get_offset(cut, prev_cut, prev_offset, transition_type)
+                if not c_spk in prev_offset_spk.keys():
+                    c_offset = self.get_offset(prev_cut, prev_offset, 0.0, transition_type)
+                else:
+                    c_offset = self.get_offset(prev_cut, prev_offset, prev_offset_spk[c_spk], transition_type)
                 offsets.append(c_offset)
                 utterances.append(cut)
 
             utt_indx += 1
             prev_cut = cut
-            prev_speaker = cut.supervisions[0].speaker
+            prev_speaker = c_spk
             seen_speakers.add(prev_speaker)
             prev_transition = transition_type
             prev_offset = offsets[-1]
+            if prev_speaker not in prev_offset_spk.keys():
+                prev_offset_spk[prev_speaker] = prev_offset + cut.duration
+            else:
+                prev_offset_spk[prev_speaker] = max(prev_offset + cut.duration, prev_offset_spk[prev_speaker])
+
             current_time = prev_offset + cut.duration
 
-        base_gain = np.random.uniform(-35, -8)
+        base_gain = np.random.uniform(*BASE_GAIN)
         speech_lvls = []
         for utt in utterances:
-            c_gain = np.random.uniform(-12, +5)
+            c_gain = np.random.uniform(*REL_GAIN)
             speech_lvls.append(base_gain + c_gain)
 
         # fetch the maximum length
         output_audio = np.zeros((1, int(current_time * self.sample_rate)))
 
+        if self.save_spk:
+            # we need to check if all cuts have only one supervions TODO
+            all_spk = list(set([x.supervisions[0].speaker for x in utterances]))
+            spk2audio = {x: deepcopy(output_audio) for x in all_spk}
+         
         for cut, offset, c_speech_lvl in zip(utterances, offsets, speech_lvls):
             # load audio here
             c_audio = cut.load_audio()
-            initial_duration = c_audio.shape[-1]
+            #initial_duration = c_audio.shape[-1]
             # remove dc offset via highpass filtering here.
             # remove anything under 65 Hz to avoid recognizing speaker from artifacts in recording
-            assert c_audio.shape[0] == 1
+            assert c_audio.shape[0] == 1 #TODO support multi-channel
             # this reduces overfitting on low freq noise e.g. distinguishing speakers by noise
             c_audio = c_audio - np.mean(c_audio, -1, keepdims=True)
             c_audio = fftconvolve(c_audio, fir_highpass[None, :], mode="same")
             # reverberate
-            c_rir = np.random.choice(c_room_rirs)
-            c_rir = c_rir.load_audio()
 
-            peak = np.argmax(np.abs(c_rir), -1)
-            around_peak = int(
-                0.05 / (1 / 16000)
-            )  # consider prev reflections 50ms before peak too
+            if REVERBERATE:
+                c_rir = np.random.choice(c_room_rirs)
+                c_rir = c_rir.load_audio()
 
-            try:
-                c_rir = c_rir[
-                    :, max(0, peak - around_peak) :
-                ]  # take values around peak
-            except TypeError:
-                c_rir = c_rir[:, max(0, peak[0] - around_peak) :]
+                peak = np.argmax(np.abs(c_rir), -1)
+                around_peak = int(
+                    0.05 / (1 / self.sample_rate)
+                )  # consider prev reflections 50ms before peak too
 
-            # when rir is too long wrt audio then it creates artifacts
-            if c_audio.shape[-1] / 2 > c_rir.shape[-1]:
-                c_audio = scipy.signal.convolve(c_audio, c_rir, mode="same")
-            else:
-                c_rir = c_rir[..., : c_audio.shape[-1] // 4]
-                c_audio = scipy.signal.convolve(c_audio, c_rir, mode="same")
+                try:
+                    c_rir = c_rir[
+                            :, max(0, peak - around_peak):
+                            ]  # take values around peak
+                except TypeError:
+                    c_rir = c_rir[:, max(0, peak[0] - around_peak):]
 
-            # else:
-            #    pass
-            # truncate rir
-            # c_rir = c_rir[..., :c_audio.shape[-1]//4]
+                # when rir is too long wrt audio then it creates artifacts
+                if c_audio.shape[-1] / 2 > c_rir.shape[-1]:
+                    c_audio = scipy.signal.convolve(c_audio, c_rir, mode="same")
+                else:
+                    c_rir = c_rir[..., : c_audio.shape[-1] // 4]
+                    c_audio = scipy.signal.convolve(c_audio, c_rir, mode="same")
 
-            # do not convolve for very short utterances
-            # if c_rir.shape[-1] > c_audio.shape[-1]//8:
-
-            # c_audio = np.pad(c_audio, ((0, 0), (c_rir.shape[-1], c_rir.shape[-1])), mode='constant')
-            # c_audio = c_audio[:, c_rir.shape[-1]:]
             # gain adjust
             c_audio = self.normalize_to(c_audio, c_speech_lvl)
             offset = int(offset * self.sample_rate)
@@ -743,17 +555,36 @@ class ConversationalMeetingSimulator:
                 output_audio = np.concatenate(
                     (output_audio, c_audio[:, -residual:]), axis=-1
                 )
+
+                if self.save_spk:
+                    c_spk = cut.supervisions[0].speaker
+                    spk2audio[c_spk][:, offset: offset + c_audio.shape[-1]] += c_audio[:, :-residual]
+                    spk2audio[c_spk] = np.concatenate(
+                    (spk2audio[c_spk], c_audio[:, -residual:]), axis=-1
+                )
+
+               # if self.
             else:
                 output_audio[:, offset : offset + c_audio.shape[-1]] += c_audio
+                if self.save_spk:
+                    c_spk =  cut.supervisions[0].speaker
+                    spk2audio[c_spk][:, offset: offset + c_audio.shape[-1]] += c_audio
 
         # add some gaussian noise here.
         # if we have noise we can add that too. e.g. wham and sins, qut etc
-        min_lvl = min(speech_lvls)
-        output_audio = self.add_gaussian_noise(output_audio, min_lvl, (-30, 3))
+
+        if self.add_noise:
+            min_lvl = min(speech_lvls)
+            output_audio = self.add_gaussian_noise(output_audio, min_lvl, (-30, 3))
 
         maxval = np.amax(np.abs(output_audio))
+        gain_f = 0.99 / maxval
+
         if maxval > 0.99:
-            output_audio = output_audio * (0.99 / maxval)
+            output_audio = output_audio * gain_f
+            if self.save_spk:
+                for k in spk2audio.keys():
+                    spk2audio[k] = spk2audio[k] * gain_f
 
         # Generate unique filename
         recording_id = str(uuid4())
@@ -763,6 +594,10 @@ class ConversationalMeetingSimulator:
 
         # Save audio to disk
         sf.write(audio_path, output_audio.T, self.sample_rate)
+
+        if self.save_spk:
+            for k in spk2audio:
+                sf.write(os.path.join(self.output_dir, f"{recording_id}-spk-{k}.wav"), spk2audio[k].T, self.sample_rate)
 
         # Create Lhotse Recording
         recording = Recording(
@@ -778,14 +613,18 @@ class ConversationalMeetingSimulator:
         for i, (cut, offset) in enumerate(zip(utterances, offsets)):
             orig_supervision = cut.supervisions[0]
 
-            # Adjust alignments if they exist
-            alignment = None
-            """
-            if (
-                hasattr(orig_supervision, "alignment")
-                and orig_supervision.alignment is not None
-            ):
 
+            # Adjust alignments if they exist #TODO
+
+            try:
+                orig_supervision.alignment.keys()
+            except:
+                import pdb
+                pdb.set_trace()
+
+
+            if hasattr(orig_supervision, "alignment") and "word" in orig_supervision.alignment.keys():
+                # add the offset to the alignments here
                 adjusted_alignment = []
 
                 for align_item in orig_supervision.alignment["word"]:
@@ -798,6 +637,16 @@ class ConversationalMeetingSimulator:
                     )
                     adjusted_alignment.append(adjusted_item)
                 alignment = adjusted_alignment
+            else:
+                alignment = None
+
+            """
+            if (
+                hasattr(orig_supervision, "alignment")
+                and orig_supervision.alignment is not None
+            ):
+
+                
             """
             supervision = SupervisionSegment(
                 id=f"{recording_id}_{i:04d}",
@@ -808,7 +657,7 @@ class ConversationalMeetingSimulator:
                 speaker=orig_supervision.speaker,
                 text=getattr(orig_supervision, "text", ""),  # Use text if available
                 language=getattr(orig_supervision, "language", None),
-                # alignment={"word": alignment},  # Include adjusted alignments
+                alignment={"word": alignment} if alignment is not None else None,  # Include adjusted alignments
                 custom={
                     "transition_type": transition_type.name if i > 0 else "FIRST",
                     "speech_level_db": speech_lvls[i],
@@ -818,95 +667,6 @@ class ConversationalMeetingSimulator:
             supervisions.append(supervision)
 
         return recording, supervisions
-
-    def get_mixture(self, meeting_indx):
-
-        n_speakers = np.random.randint(*self.min_max_spk)
-        target_dur = self.target_duration
-        sampled_spk = np.random.choice(self.speakers, n_speakers, replace=False)
-        current_time = 0
-        utt_indx = 0
-        prev_transition = None
-        prev_cut = None
-        prev_speaker = None
-        seen_speakers = set()
-
-        utterances = []
-        offsets = []
-
-        if self.rirs is not None:
-            c_room_rirs = self.rirs[np.random.randint(0, len(self.rirs))]
-
-        while current_time < target_dur or len(seen_speakers) < len(sampled_spk):
-
-            transition_type = self.select_transition_type(prev_transition)
-            if transition_type == TransitionType.TURN_HOLD:
-                # Same speaker
-                if prev_speaker is not None:
-                    current_speaker = prev_speaker
-                else:
-                    # random choice of next speaker first utterance
-                    current_speaker = np.random.choice(sampled_spk)
-            else:
-                # Different speaker
-                if prev_speaker is not None:
-                    available_speakers = [s for s in sampled_spk if s != prev_speaker]
-                    current_speaker = np.random.choice(available_speakers)
-                else:
-                    current_speaker = np.random.choice(sampled_spk)
-
-            cut = np.random.choice(self.spk2cuts[current_speaker])
-
-            # Load audio
-            if self.speed_perturb:
-                # keep these fixed
-                factor = np.random.uniform(SPEED_PERTURB_LOW, SPEED_PERTURB_HIGH)
-                cut = cut.perturb_speed(factor)
-
-            if self.rirs is not None:
-                cut = cut.reverb_rir(np.random.choice(c_room_rirs))
-
-            if utt_indx == 0:
-                offsets.append(0.0)
-                utterances.append(cut)
-            else:
-                c_offset = self.get_offset(cut, prev_cut, prev_offset, transition_type)
-
-                offsets.append(c_offset)
-                utterances.append(cut)
-
-            utt_indx += 1
-            prev_cut = cut
-            prev_speaker = cut.supervisions[0].speaker
-            seen_speakers.add(prev_speaker)
-            prev_transition = transition_type
-            prev_offset = offsets[-1]
-            current_time = prev_offset + cut.duration
-
-        utterances, offsets = zip(*sorted(zip(utterances, offsets), key=lambda x: x[1]))
-        spk_tracks = defaultdict(list)
-        for utt, offset in zip(utterances, offsets):
-            spk_tracks[utt.supervisions[0].speaker].append((utt, offset))
-
-        tracks = []
-        for spk, spk_utts in spk_tracks.items():
-            track, start = spk_utts[0]
-            for utt, offset in spk_utts[1:]:
-                track = mix(
-                    track,
-                    utt,
-                    offset=add_durations(
-                        offset, -start, sampling_rate=self.sample_rate
-                    ),
-                    allow_padding=True,
-                )
-            track = MixTrack(cut=track, type=type(track), offset=start)
-            tracks.append(track)
-
-        # sort tracks by track offset
-        tracks = sorted(tracks, key=lambda x: x.offset)
-        return MixedCut(id=str(uuid4()), tracks=tracks)
-
 
 def split_recording_by_channels(recording: Recording) -> List[MonoCut]:
     """
@@ -934,57 +694,57 @@ def split_recording_by_channels(recording: Recording) -> List[MonoCut]:
 
     return single_channel_cuts
 
-
 if __name__ == "__main__":
     import sys
     import random
     num_from = int(sys.argv[1])
     num_to = int(sys.argv[2])
 
-    np.random.seed(num_from + random.randint(0, num_to-num_from))
-    random.seed(num_from + random.randint(0, num_to-num_from))
+    rand_seed = num_from + random.randint(0, num_to-num_from)
+    np.random.seed(rand_seed)
+    random.seed(rand_seed)
 
     # get cutset from librispeech.
     # split it.
     STAGE = 4
     dset_name = "emilia"
     OUTPUT_DIR = sys.argv[3]
-    RIR_PATH = "/scratch.ssd/dklement/job_11306482.pbs-m1/diar_data/rirs/rirs.json.gz"
+    RIR_PATH = "/scratch/project/open-33-6/dklement/data/diar_data/rirs/rirs.json.gz"
 
     N_POSITIONS_RIRs = 50
     SPLIT_FA_FACTOR = 0.1
     N_RIRs = 10000
     NUM_MEETINGS = num_to - num_from  # 3k hours for 120 seconds meetings
     # 1000 meetings I can do in 5 mins with 16 jobs.
-    N_JOBs = 1
+    N_JOBs = 64
     MIN_MAX_SPK = (2, 11)
     DURATION = int(sys.argv[4])
 
-    all_cuts = lhotse.load_manifest(os.path.join(OUTPUT_DIR, "manifests", "all_cuts_splitted.jsonl.gz"))
+    # if STAGE <= 3:
+    #     print("Stage 3...")
+    #     logger.info("Simulating RIRs using Pyroomacoustics")
 
-    if STAGE <= 3:
-        print("Stage 3...")
-        logger.info("Simulating RIRs using Pyroomacoustics")
+    #     helper_func = partial(
+    #         ConversationalMeetingSimulator.gen_rirs,
+    #         output_dir="/scratch/project/open-33-6/dklement/data/diar_data/rirs",
+    #         n_positions=N_POSITIONS_RIRs,
+    #     )
 
-        helper_func = partial(
-            ConversationalMeetingSimulator.gen_rirs,
-            output_dir=os.path.join(OUTPUT_DIR, "rirs"),
-            n_positions=N_POSITIONS_RIRs,
-        )
-
-        meeting_ids = iter([f"rirs_{x}" for x in range(N_RIRs)])
-        all_rirs = []
-        for recording in tqdm(
-            parallel_map(helper_func, meeting_ids, num_jobs=N_JOBs),
-            total=N_RIRs,
-            desc="Simulating room impulse responses (RIRs)",
-        ):
-            all_rirs.append(recording)
-        all_rirs = RecordingSet.from_recordings(all_rirs)
-        all_rirs.to_file(RIR_PATH)
+    #     meeting_ids = iter([f"rirs_{x}" for x in range(N_RIRs)])
+    #     all_rirs = []
+    #     for recording in tqdm(
+    #         parallel_map(helper_func, meeting_ids, num_jobs=N_JOBs),
+    #         total=N_RIRs,
+    #         desc="Simulating room impulse responses (RIRs)",
+    #     ):
+    #         all_rirs.append(recording)
+    #     all_rirs = RecordingSet.from_recordings(all_rirs)
+    #     all_rirs.to_file(RIR_PATH)
+    #     exit()
 
 
     if STAGE <= 4:
+        all_cuts = lhotse.load_manifest(os.path.join(OUTPUT_DIR, "manifests", "all_cuts_splitted.jsonl.gz"))
         try:
             all_cuts
         except NameError:
@@ -1007,7 +767,10 @@ if __name__ == "__main__":
             Path(OUTPUT_DIR).absolute() / Path("audio"),
             all_cuts,
             rirs=rirs,
-            min_max_spk=MIN_MAX_SPK, target_duration=DURATION
+            min_max_spk=MIN_MAX_SPK, 
+            target_duration=DURATION,
+            save_spk=SAVE_SPK,
+            add_noise=ADD_NOISE,
         )
 
         output_dir = Path(OUTPUT_DIR).absolute() / Path("manifests")
