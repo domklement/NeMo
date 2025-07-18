@@ -131,15 +131,17 @@ class TALayer(nn.Module):
 
 
 class TransformerAttractors(nn.Module):
-    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.02):
+    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, attr_dropout: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.1):
         super().__init__()
         self.d_model = d_model
         self.n_speakers = n_speakers
         self.n_ta_layers = n_ta_layers
+        self.attr_dropout = attr_dropout
 
         self.global_embeddings = nn.Parameter(torch.randn(self.n_speakers + 1, self.d_model))
         self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
         self.attractor_proj = nn.Linear(self.d_model, 1)
+        self.attr_dropout = nn.Dropout(p=attr_dropout)
 
         # for n, p in self.named_parameters():
         #     if 'norm' not in n:
@@ -174,6 +176,7 @@ class TransformerAttractors(nn.Module):
 
         for _, layer in enumerate(self.ta_layers):
             combined_utt_embs = layer(combined_utt_embs, emb_seq, ce_mask)
+        combined_utt_embs = self.attr_dropout(combined_utt_embs)
 
         return combined_utt_embs, self.attractor_proj(combined_utt_embs)
 
@@ -265,6 +268,10 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             )
             # self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
             # self.emb_seq_ln.weight.data = self.emb_seq_ln.weight.data * self.ta_weights_init_constant
+
+            self.use_scaled_cos_sim_for_attr_dot = self._cfg.get("use_scaled_cos_sim_for_attr_dot", False)
+            if self.use_scaled_cos_sim_for_attr_dot:
+                self.attr_dot_scale = nn.Parameter(torch.tensor(1.0))
 
         else:
             self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
@@ -450,11 +457,16 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         """
         logits = self.sortformer_modules.forward_speaker_logits(emb_seq)
         return logits
-    
+
     def forward_infer_transformer_attractors(self, global_tokens, emb_seq, emb_seq_length):
         attractors, attr_logits = self.transformer_attractors(global_tokens[:, 0, :], emb_seq, emb_seq_length)
         attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
-        logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
+        # EMB_SEQ is (B, T, D)
+        if self.use_scaled_cos_sim_for_attr_dot:
+            cos_sims = torch.bmm(emb_seq, attractors.transpose(-1,-2)) / (emb_seq.norm(dim=-1).unsqueeze(-1) * attractors.norm(dim=-1).unsqueeze(dim=1))
+            logits = cos_sims * self.attr_dot_scale
+        else:
+            logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
         return logits, attractors, attr_logits
 
     def _diarize_forward(self, batch: Any):
