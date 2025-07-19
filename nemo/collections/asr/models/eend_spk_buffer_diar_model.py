@@ -131,17 +131,17 @@ class TALayer(nn.Module):
 
 
 class TransformerAttractors(nn.Module):
-    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, attr_dropout: float = 0.1, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.1):
+    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, attr_dropout: float = 0.0, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.1):
         super().__init__()
         self.d_model = d_model
         self.n_speakers = n_speakers
         self.n_ta_layers = n_ta_layers
-        self.attr_dropout = attr_dropout
+        self.attr_dropout_prob = attr_dropout
 
         self.global_embeddings = nn.Parameter(torch.randn(self.n_speakers + 1, self.d_model))
         self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
         self.attractor_proj = nn.Linear(self.d_model, 1)
-        self.attr_dropout = nn.Dropout(p=attr_dropout)
+        self.attr_dropout = nn.Dropout(p=self.attr_dropout_prob)
 
         # for n, p in self.named_parameters():
         #     if 'norm' not in n:
@@ -263,7 +263,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 n_speakers=self.max_num_of_spks,
                 n_ta_layers=4,
                 n_heads=4,
-                dropout_att=0.0,
+                dropout_att=self._cfg.get("ta_dropout_att", 0.0),
+                attr_dropout=self._cfg.get("ta_attr_dropout", 0.0),
                 ta_weights_init_constant=self.ta_weights_init_constant,
             )
             # self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
@@ -271,7 +272,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
             self.use_scaled_cos_sim_for_attr_dot = self._cfg.get("use_scaled_cos_sim_for_attr_dot", False)
             if self.use_scaled_cos_sim_for_attr_dot:
-                self.attr_dot_scale = nn.Parameter(torch.tensor(1.0))
+                self.attr_dot_scale = nn.Parameter(torch.tensor(self._cfg.get("attr_dot_scale_init_val", 1.0)))
 
         else:
             self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
@@ -1479,7 +1480,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
         def get_all_module_names_of_type(module, instance, name_prefix=''):
             if isinstance(module, instance):
-                return [name_prefix]
+                return [(name_prefix + '.' + n if name_prefix else n) for n, p in module.named_parameters()]
 
             res = []
             for n, ch in module.named_children():
@@ -1497,8 +1498,11 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         learnable_vectors_group = []
         other_group_no_decay = []
         other_group_decay = []
+        attr_dot_scale_group = []
         for n, p in self.named_parameters():
-            if '.spk_buffer.' in n or 'extra_global_tokens' in n:
+            if 'attr_dot_scale' in n:
+                attr_dot_scale_group.append(p)
+            elif '.spk_buffer.' in n or 'extra_global_tokens' in n:
                 print('LEARNABLE VECTOR:', n)
                 learnable_vectors_group.append(p)
             elif n in layer_norm_names or n in embed_names:
@@ -1516,7 +1520,12 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             },
             {
                 "params": learnable_vectors_group, 
-                "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 100),
+                "lr": self.cfg.optim.lr * self.cfg.get('learnable_vectors_lr_multiplier', 1),
+                "weight_decay": 0.0
+            },
+            {
+                "params": attr_dot_scale_group,
+                "lr": self.cfg.optim.lr * self.cfg.get('attr_dot_scale_lr_multiplier', 1),
                 "weight_decay": 0.0
             },
         ]
