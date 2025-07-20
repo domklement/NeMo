@@ -115,7 +115,7 @@ class MeetevalDER(Metric):
 
     def _process_metric_res(self, per_item_res: List[Dict]):
         res = {'scored_speaker_time': 0, 'missed_speaker_time': 0, 'falarm_speaker_time': 0, 'speaker_error_time': 0}
-        for item_res in per_item_res:
+        for _, item_res in per_item_res.items():
             # Meeteval returns a dict with utt_id as key and the error as value.
             # We're scoring per-item so it's always a single item dict.
             item_res = list(item_res.values())[0]
@@ -125,6 +125,20 @@ class MeetevalDER(Metric):
             res['speaker_error_time'] += item_res.speaker_error_time
         return res
     
+    # def _reduce_res(self, res_all_ranks: List[Dict]):
+    #     res = {'scored_speaker_time': 0, 'missed_speaker_time': 0, 'falarm_speaker_time': 0, 'speaker_error_time': 0}
+    #     for res_rank in res_all_ranks:
+    #         for k in res:
+    #             res[k] += res_rank[k]
+    #     return res
+
+    def reduce_utterances(self, res_all_ranks):
+        res = dict()
+        for rank_res in res_all_ranks:
+            for utt_id, res_der in rank_res:
+                res[utt_id] = res_der
+        return res
+
     def _reduce_res(self, res_all_ranks: List[Dict]):
         res = {'scored_speaker_time': 0, 'missed_speaker_time': 0, 'falarm_speaker_time': 0, 'speaker_error_time': 0}
         for res_rank in res_all_ranks:
@@ -184,19 +198,19 @@ class MeetevalDER(Metric):
                     print(f"Error scoring {utt_id}: {e}")
                     spk_time = sum(l.duration for l in all_targets_rttm.lines)
                     res_der = {utt_id: Namespace(scored_speaker_time=Decimal(spk_time), missed_speaker_time=Decimal(spk_time), falarm_speaker_time=Decimal(0), speaker_error_time=Decimal(0))}
-            results.append(res_der)
+            results.append((utt_id, res_der))
 
-        flattened_preds = []
-        flattened_targets = []
-        for uid in self.per_utt_data:
-            flattened_preds.extend(self.per_utt_data[uid]['pred_segments'])
-            flattened_targets.extend(self.per_utt_data[uid]['target_segments'])
-        merged_preds = self._merge_rttm_segments(flattened_preds)
-        merged_targets = self._merge_rttm_segments(flattened_targets)
-        merged_pred_rttm = RTTM(lines=merged_preds)
-        merged_target_rttm = RTTM(lines=merged_targets)
+        # flattened_preds = []
+        # flattened_targets = []
+        # for uid in self.per_utt_data:
+        #     flattened_preds.extend(self.per_utt_data[uid]['pred_segments'])
+        #     flattened_targets.extend(self.per_utt_data[uid]['target_segments'])
+        # merged_preds = self._merge_rttm_segments(flattened_preds)
+        # merged_targets = self._merge_rttm_segments(flattened_targets)
+        # merged_pred_rttm = RTTM(lines=merged_preds)
+        # merged_target_rttm = RTTM(lines=merged_targets)
 
-        results = self._process_metric_res(results)
+        # results = self._process_metric_res(results)
 
         res_all_ranks = [None] * get_world_size()
         if get_world_size() > 1:
@@ -204,11 +218,12 @@ class MeetevalDER(Metric):
         else:
             res_all_ranks[0] = results
 
-        res_all_ranks = self._reduce_res(res_all_ranks)
+        reduced_utts = self.reduce_utterances(res_all_ranks)
+        res_all_ranks = self._process_metric_res(reduced_utts)
         res_all_ranks['der'] = (res_all_ranks['speaker_error_time'] + res_all_ranks['missed_speaker_time'] + res_all_ranks['falarm_speaker_time']) / res_all_ranks['scored_speaker_time']
 
-        if pred_rttm_path is not None:
-            self._write_pred_RTTM(merged_pred_rttm, rttm_file_path=pred_rttm_path)
+        # if pred_rttm_path is not None:
+        #     self._write_pred_RTTM(merged_pred_rttm, rttm_file_path=pred_rttm_path)
 
         return res_all_ranks
 

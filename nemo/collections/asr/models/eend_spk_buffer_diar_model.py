@@ -178,7 +178,7 @@ class TransformerAttractors(nn.Module):
             combined_utt_embs = layer(combined_utt_embs, emb_seq, ce_mask)
         combined_utt_embs = self.attr_dropout(combined_utt_embs)
 
-        return combined_utt_embs, self.attractor_proj(combined_utt_embs)
+        return combined_utt_embs, self.attractor_proj(combined_utt_embs.detach())
 
 
 class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
