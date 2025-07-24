@@ -1029,6 +1029,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         train_metrics['stats/perc_silence'] = total_silence / total_length
         train_metrics['stats/min_logit'] = preds.min()
         train_metrics['stats/max_logit'] = preds.max()
+        train_metrics['stats/num_speakers'] = (targets.sum(1) > 0).sum(-1).float().mean()
 
         self._reset_train_metrics()
         self.log_dict(train_metrics, sync_dist=True, on_step=True, on_epoch=False, logger=True)
