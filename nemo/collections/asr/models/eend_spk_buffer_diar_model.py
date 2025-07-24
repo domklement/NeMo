@@ -1490,7 +1490,6 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
             return res
 
-        known_groups = []
         param_groups = []
         
         layer_norm_names = set(get_all_module_names_of_type(self, nn.LayerNorm))
@@ -1503,7 +1502,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         for n, p in self.named_parameters():
             if 'attr_dot_scale' in n:
                 attr_dot_scale_group.append(p)
-            elif '.spk_buffer.' in n or 'extra_global_tokens' in n:
+            elif '.spk_buffer.' in n or 'extra_global_tokens' in n or 'global_embeddings' in n:
                 print('LEARNABLE VECTOR:', n)
                 learnable_vectors_group.append(p)
             elif n in layer_norm_names or n in embed_names:
