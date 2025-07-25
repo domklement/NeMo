@@ -262,7 +262,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
         self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
         self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
-        self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", False)
+        self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", True)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -1084,13 +1084,17 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             logits = torch.cat(logits_list, dim=0)
             labels = torch.cat(targets_list, dim=0)
 
+            logits = logits.reshape(-1)
+            labels = labels.reshape(-1)
+
             # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
             loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
             loss[torch.where(labels == -1)] = 0
-            loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
-            loss[max_num_spks:] = 0
-
-            loss = loss.mean()
+            loss = torch.sum(loss) / (labels != -1).sum()
+            # loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
+            
+            # loss[max_num_spks:] = 0
+            # loss = loss.mean()
 
             attr_labels = torch.ones_like(attr_logits)
             for i in range(targets_pil.shape[0]):
