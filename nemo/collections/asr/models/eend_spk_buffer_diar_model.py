@@ -131,7 +131,7 @@ class TALayer(nn.Module):
 
 
 class TransformerAttractors(nn.Module):
-    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, attr_dropout: float = 0.0, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.1):
+    def __init__(self, d_model: int, n_speakers: int, n_ta_layers: int = 4, n_heads: int = 4, dropout_att: float = 0.1, attr_dropout: float = 0.0, use_pytorch_sdpa: bool = False, use_pytorch_sdpa_backends: List[str] = None, ff_expansion_factor: int = 4, ta_weights_init_constant: float = 0.1, detach_attr_exist_loss: bool = False):
         super().__init__()
         self.d_model = d_model
         self.n_speakers = n_speakers
@@ -142,6 +142,7 @@ class TransformerAttractors(nn.Module):
         self.ta_layers = nn.ModuleList([TALayer(self.d_model, self.n_speakers, ff_expansion_factor=ff_expansion_factor, n_heads=n_heads, dropout_att=dropout_att, use_pytorch_sdpa=use_pytorch_sdpa, use_pytorch_sdpa_backends=use_pytorch_sdpa_backends) for _ in range(self.n_ta_layers)])
         self.attractor_proj = nn.Linear(self.d_model, 1)
         self.attr_dropout = nn.Dropout(p=self.attr_dropout_prob)
+        self.detach_attr_exist_loss = detach_attr_exist_loss
 
         # for n, p in self.named_parameters():
         #     if 'norm' not in n:
@@ -178,7 +179,12 @@ class TransformerAttractors(nn.Module):
             combined_utt_embs = layer(combined_utt_embs, emb_seq, ce_mask)
         combined_utt_embs = self.attr_dropout(combined_utt_embs)
 
-        return combined_utt_embs, self.attractor_proj(combined_utt_embs.detach())
+        if self.detach_attr_exist_loss:
+            attr_logits = self.attractor_proj(combined_utt_embs.detach())
+        else:
+            attr_logits = self.attractor_proj(combined_utt_embs)
+
+        return combined_utt_embs, attr_logits
 
 
 class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixin):
@@ -256,6 +262,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
         self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
         self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
+        self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", False)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -266,6 +273,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 dropout_att=self._cfg.get("ta_dropout_att", 0.0),
                 attr_dropout=self._cfg.get("ta_attr_dropout", 0.0),
                 ta_weights_init_constant=self.ta_weights_init_constant,
+                detach_attr_exist_loss=self.detach_attr_exist_loss,
             )
             # self.emb_seq_ln = nn.LayerNorm(self._cfg.model_defaults.d_model)
             # self.emb_seq_ln.weight.data = self.emb_seq_ln.weight.data * self.ta_weights_init_constant
@@ -464,7 +472,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
         # EMB_SEQ is (B, T, D)
         if self.use_scaled_cos_sim_for_attr_dot:
-            cos_sims = torch.bmm(emb_seq, attractors.transpose(-1,-2)) / (emb_seq.norm(dim=-1).unsqueeze(-1) * attractors.norm(dim=-1).unsqueeze(dim=1))
+            cos_sims = torch.bmm(emb_seq / emb_seq.norm(dim=-1).unsqueeze(-1), (attractors / attractors.norm(dim=-1).unsqueeze(-1)).transpose(-1,-2))
             logits = cos_sims * self.attr_dot_scale
         else:
             logits = torch.bmm(emb_seq, attractors.transpose(-1,-2))
