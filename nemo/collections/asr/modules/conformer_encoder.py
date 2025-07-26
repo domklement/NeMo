@@ -38,6 +38,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
 )
 from nemo.collections.asr.parts.submodules.subsampling import (
     ConvSubsampling,
+    StackOverlapSubsampling,
     StackingSubsampling,
     SubsamplingReductionModule,
 )
@@ -327,6 +328,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         use_pytorch_sdpa: bool = False,
         use_pytorch_sdpa_backends=None,
         sync_max_audio_length: bool = True,
+        subsampling_context_size=7,
     ):
         super().__init__()
         d_ff = d_model * ff_expansion_factor
@@ -336,6 +338,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         self.att_context_style = att_context_style
         self.subsampling_factor = subsampling_factor
         self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
+        self.subsampling_context_size = subsampling_context_size
 
         self.self_attention_model = self_attention_model
         self.global_tokens = global_tokens
@@ -377,6 +380,14 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                     feat_in=feat_in,
                     feat_out=d_model,
                     norm=True if subsampling == 'stacking_norm' else False,
+                )
+            elif subsampling in ['stack_overlap', 'stack_overlap_norm']:
+                self.pre_encode = StackOverlapSubsampling(
+                    subsampling_factor=subsampling_factor,
+                    feat_in=feat_in,
+                    feat_out=d_model,
+                    norm=True if subsampling == 'stacking_norm' else False,
+                    context_size=subsampling_context_size,
                 )
             else:
                 self.pre_encode = ConvSubsampling(

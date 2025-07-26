@@ -1770,6 +1770,7 @@ class AudioToSpeechE2ESpkDiarRandomChunkDataset(_AudioToSpeechE2ESpkDiarRandomCh
         soft_targets: bool,
         device: str,
         equalize_recording_lengths: bool = True,
+        subsampling_factor: int = 8,
     ):
         super().__init__(
             manifest_filepath=manifest_filepath,
@@ -1782,6 +1783,7 @@ class AudioToSpeechE2ESpkDiarRandomChunkDataset(_AudioToSpeechE2ESpkDiarRandomCh
             soft_targets=soft_targets,
             device=device,
             equalize_recording_lengths=equalize_recording_lengths,
+            subsampling_factor=subsampling_factor,
         )
 
     def eesd_train_collate_fn(self, batch):

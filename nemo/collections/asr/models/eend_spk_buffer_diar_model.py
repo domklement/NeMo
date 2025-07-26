@@ -363,6 +363,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             global_rank=global_rank,
             soft_targets=config.soft_targets if 'soft_targets' in config else False,
             device=self.device,
+            subsampling_factor=self._cfg.encoder.subsampling_factor,
             equalize_recording_lengths=config.get('equalize_recording_lengths', False),
         )
 
@@ -1073,33 +1074,51 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             if attr_logits is None:
                 raise ValueError("attr_probs is required when use_transformer_attractors is True")
 
-            max_num_spks = 0
-            for i in range(targets_pil.shape[0]):
-                n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
-                targets_pil[i, :, n_speakers:] = -1
-                max_num_spks = max(max_num_spks, n_speakers)
+            # max_num_spks = 0
+            # for i in range(targets_pil.shape[0]):
+            #     n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
+            #     targets_pil[i, :, n_speakers:] = -1
+            #     max_num_spks = max(max_num_spks, n_speakers)
 
-            logits_list = [preds[k, : target_lens[k], :] for k in range(preds.shape[0])]
-            targets_list = [targets_pil[k, : target_lens[k], :] for k in range(targets_pil.shape[0])]
-            logits = torch.cat(logits_list, dim=0)
-            labels = torch.cat(targets_list, dim=0)
+            # logits_list = [preds[k, : target_lens[k], :] for k in range(preds.shape[0])]
+            # targets_list = [targets_pil[k, : target_lens[k], :] for k in range(targets_pil.shape[0])]
+            # logits = torch.cat(logits_list, dim=0)
+            # labels = torch.cat(targets_list, dim=0)
 
-            logits = logits.reshape(-1)
-            labels = labels.reshape(-1)
+            # logits = logits.reshape(-1)
+            # labels = labels.reshape(-1)
 
-            # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
-            loss[torch.where(labels == -1)] = 0
-            loss = torch.sum(loss) / (labels != -1).sum()
+            # # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
+            # loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
+            # loss[torch.where(labels == -1)] = 0
+            # loss = torch.sum(loss) / (labels != -1).sum()
             # loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
             
             # loss[max_num_spks:] = 0
             # loss = loss.mean()
 
+            # max_num_spks = 0
+            n_speakers = []
+            for i in range(targets_pil.shape[0]):
+                # n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
+                n_speakers.append((targets_pil[i].long().sum(0) > 0).sum())
+                # targets_pil[i, :, n_speakers:] = -1
+                targets_pil[i, target_lens[i]:, :] = -1
+                # max_num_spks = max(max_num_spks, n_speakers)
+
+            # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(preds, (targets_pil>0).float(), reduction='none')
+            loss[torch.where(targets_pil == -1)] = 0
+            loss = loss.sum(dim=1) / (targets_pil != -1).sum(dim=1)
+            
+            for i in range(preds.shape[0]):
+                loss[i, n_speakers[i]:] = 0
+
+            loss = loss.mean()
+
             attr_labels = torch.ones_like(attr_logits)
             for i in range(targets_pil.shape[0]):
-                n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
-                attr_labels[i, n_speakers:, :] = 0
+                attr_labels[i, n_speakers[i]:, :] = 0
             attr_loss = nn.functional.binary_cross_entropy_with_logits(attr_logits, attr_labels)
 
             return {
