@@ -522,9 +522,12 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
                     self.register_accessible_tensor(name=f'interctc/layer_length_{lth}', tensor=length)
 
         if output_prepend_global_tokens:
-            global_tokens_out = audio_signal[:, :self.global_tokens, :]
-            audio_signal = audio_signal[:, self.global_tokens:, :]
-            pad_mask = pad_mask[:, self.global_tokens:]
+            if self.prepend_global_tokens:
+                global_tokens_out = audio_signal[:, :self.global_tokens, :]
+                audio_signal = audio_signal[:, self.global_tokens:, :]
+                pad_mask = pad_mask[:, self.global_tokens:]
+            else:
+                global_tokens_out = audio_signal[:, :self.global_tokens:self.global_tokens_spacing, :]
 
         if self.out_proj is not None:
             audio_signal = self.out_proj(audio_signal)

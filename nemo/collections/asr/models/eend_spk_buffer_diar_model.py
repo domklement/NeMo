@@ -263,6 +263,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
         self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
         self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", True)
+        self.aux_attr_perp_loss_weight = self._cfg.get("aux_attr_perp_loss_weight", 0.5)
+        self.aux_same_emb_loss_weight = self._cfg.get("aux_same_emb_loss_weight", 0.1)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -469,6 +471,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         return logits
 
     def forward_infer_transformer_attractors(self, global_tokens, emb_seq, emb_seq_length):
+        if global_tokens.numel() == 0:
+            global_tokens = torch.zeros_like(emb_seq[:, :1, :])
         attractors, attr_logits = self.transformer_attractors(global_tokens[:, 0, :], emb_seq, emb_seq_length)
         attractors = attractors[:, :-1, :] # Remove the last attractor, which should be inactive.
         # EMB_SEQ is (B, T, D)
@@ -711,7 +715,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 # preds are logits here as well now!
                 preds = self.forward_infer(emb_seq, emb_seq_length)
 
-        return preds, attractors, attr_logits
+        return emb_seq, emb_seq_length, preds, attractors, attr_logits
 
     @property
     def input_names(self):
@@ -1026,9 +1030,31 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         """
         audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
 
-        preds, attractors, attr_logits = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
+        emb_seq, emb_seq_length, preds, attractors, attr_logits = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
+
+        # Aux losses
+        aux_attr_labels = torch.eye(10, device=attractors.device, dtype=torch.float32).unsqueeze(0).repeat((targets.shape[0], 1, 1))
+        attr_cos_sims = torch.bmm((attractors / attractors.norm(dim=-1).unsqueeze(-1)), (attractors / attractors.norm(dim=-1).unsqueeze(-1)).transpose(-1,-2)).float()
+        aux_attr_perp_loss = torch.nn.functional.mse_loss(attr_cos_sims, aux_attr_labels)
+
+        # Aux Emb loss
+        same_emb_loss = 0
+        num_spks = 0
+        for i in range(emb_seq.shape[0]):
+            for j in range(targets.shape[-1]):
+                if targets[i, :, j].sum() > 0:
+                    spks_embeds = emb_seq[i, ...][targets[i, :, j].bool()]
+                    same_emb_loss += torch.nn.functional.mse_loss(spks_embeds, spks_embeds.mean(dim=0))
+                    num_spks += 1
+
+        same_emb_loss = same_emb_loss / num_spks
+
+        train_metrics['aux_loss/aux_attr_perp_loss'] = aux_attr_perp_loss
+        train_metrics['aux_loss/same_emb_loss'] = same_emb_loss
+        train_metrics['loss/loss'] = train_metrics['loss/loss'] + self.aux_attr_perp_loss_weight*aux_attr_perp_loss + self.aux_same_emb_loss_weight*same_emb_loss
+
 
         total_silence = 0
         total_length = 0
@@ -1222,7 +1248,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             dict: A dictionary containing various validation metrics for this batch.
         """
         audio_signal, audio_signal_length, targets, target_lens, uniq_ids, offsets, rttm_file_paths = batch
-        preds, attractors, attr_logits = self.forward(
+        emb_seq, emb_seq_length, preds, attractors, attr_logits = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
         )
