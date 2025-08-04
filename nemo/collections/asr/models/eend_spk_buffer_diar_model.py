@@ -1499,9 +1499,9 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             return output_dict
     
     def on_before_optimizer_step(self, optimizer):
-        for p_name, p in self.named_parameters():
-            if p.grad is None:
-                print('NO GRAD PARAM:', p_name)
+        # for p_name, p in self.named_parameters():
+        #     if p.grad is None:
+        #         print('NO GRAD PARAM:', p_name)
         # Compute the 2-norm for each layer
         # If using mixed precision, the gradients are already unscaled here
         norms = grad_norm(self, norm_type=2)
@@ -1523,6 +1523,10 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             log_dict = {
                 'trainer/grad_l2_norm': norms['grad_2.0_norm_total'],
                 'per_block_grad_norms/pre_encode_grad_l2_norm': torch.stack(pre_encode_layer_norms).norm(2),
+            }
+        else:
+            log_dict = {
+                'trainer/grad_l2_norm': norms['grad_2.0_norm_total'],
             }
 
         for l in range(len(self.encoder.layers)):

@@ -75,7 +75,7 @@ class TransitionType(Enum):
 class TransitionParams:
     """Parameters for each transition type"""
 
-    beta_th: float = 0.77  # Expected pause duration for turn-hold
+    beta_th: float = 5.00  # Expected pause duration for turn-hold
     beta_ts: float = 0.60  # Expected gap duration for turn-switch
     beta_ir: float = 0.44  # Expected overlap ratio for interruption
     beta_bc: float = 0.67  # Expected overlap ratio for backchannel # not used now
@@ -103,6 +103,43 @@ class TransitionParams:
     def fit(self, supervisions: Optional[SupervisionSet] = None):
         raise NotImplementedError  # TODO this would be cool, fit on supervisionset
         pass
+
+
+def apply_smooth_fade(audio: np.ndarray, sample_rate: int, fade_duration_ms: float = 50.0) -> np.ndarray:
+    """
+    Apply a smooth fade-in and fade-out using a Tukey (flattened Gaussian-like) window.
+    
+    Args:
+        audio (np.ndarray): Input audio waveform, float32 [-1, 1].
+        sample_rate (int): Sampling rate in Hz.
+        fade_duration_ms (float): Duration of fade-in/out in milliseconds.
+    
+    Returns:
+        np.ndarray: Faded audio.
+    """
+    fade_samples = int(sample_rate * fade_duration_ms / 1000)
+
+    if fade_samples == 0 or 2 * fade_samples >= len(audio):
+        raise ValueError("Fade duration too long for this audio clip.")
+
+    # Create Tukey window with flat center and smooth edges
+    window = tukey(2 * fade_samples, alpha=0.8)  # alpha controls flatness
+    fade_in = window[:fade_samples]
+    fade_out = window[fade_samples:]
+
+    audio = audio.copy()
+
+    # Mono or stereo
+    if audio.ndim == 1:
+        audio[:fade_samples] *= fade_in
+        audio[-fade_samples:] *= fade_out
+    elif audio.ndim == 2:
+        audio[:fade_samples, :] *= fade_in[:, None]
+        audio[-fade_samples:, :] *= fade_out[:, None]
+    else:
+        raise ValueError("Audio must be mono or stereo")
+
+    return audio
 
 
 class ConversationalMeetingSimulator:
@@ -157,9 +194,12 @@ class ConversationalMeetingSimulator:
 
         logger.info("Removing speakers with too few utterances.")
         prev_spk = len(spk2cuts.keys())
+        keys_to_remove = []
         for spk in spk2cuts.keys():
             if len(spk2cuts[spk]) < min_spk_utt:
-                del spk2cuts[spk]
+                keys_to_remove.append(spk)
+        for spk in keys_to_remove:
+            del spk2cuts[spk]
         logger.info(f"Before {prev_spk}, now {len(spk2cuts.keys())} speakers.")
 
         self.spk2cuts = spk2cuts
@@ -709,7 +749,7 @@ if __name__ == "__main__":
     STAGE = 4
     dset_name = "emilia"
     OUTPUT_DIR = sys.argv[3]
-    RIR_PATH = "/scratch/project/open-33-6/dklement/data/diar_data/rirs/rirs.json.gz"
+    RIR_PATH = "/scratch.ssd/dklement/job_11306482.pbs-m1/diar_data/rirs/rirs.json.gz"
 
     N_POSITIONS_RIRs = 50
     SPLIT_FA_FACTOR = 0.1
@@ -717,7 +757,7 @@ if __name__ == "__main__":
     NUM_MEETINGS = num_to - num_from  # 3k hours for 120 seconds meetings
     # 1000 meetings I can do in 5 mins with 16 jobs.
     N_JOBs = 64
-    MIN_MAX_SPK = (2, 11)
+    MIN_MAX_SPK = (1, 11)
     DURATION = int(sys.argv[4])
 
     # if STAGE <= 3:
@@ -745,6 +785,7 @@ if __name__ == "__main__":
 
     if STAGE <= 4:
         all_cuts = lhotse.load_manifest(os.path.join(OUTPUT_DIR, "manifests", "all_cuts_splitted.jsonl.gz"))
+        # all_cuts = lhotse.load_manifest('/scratch.ssd/dklement/job_11306482.pbs-m1/emilia_data/emilia_subset_20utt_50kspks_en_only/manifests/emilia-train-ihm-cutset_aligned_fixed_sources_min_dnsmos_3.3_2.jsonl')
         try:
             all_cuts
         except NameError:
