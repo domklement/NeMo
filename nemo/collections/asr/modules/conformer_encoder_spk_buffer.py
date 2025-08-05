@@ -434,7 +434,9 @@ class ConformerEncoderSpkBuff(ConformerEncoder):
         )
 
         if self.prepend_global_tokens:
-            assert att_mask is None
+            if att_mask is not None:
+                att_mask = torch.cat([torch.zeros(att_mask.shape[0], self.global_tokens, att_mask.shape[-1], dtype=torch.bool, device=audio_signal.device), att_mask], dim=1)
+                att_mask = torch.cat([att_mask, torch.zeros(att_mask.shape[0], att_mask.shape[1], self.global_tokens, dtype=torch.bool, device=audio_signal.device)], dim=-1)
             bsize = audio_signal.shape[0]
             audio_signal = torch.cat([self.extra_global_tokens.unsqueeze(0).repeat(bsize, 1, 1), audio_signal], dim=1)
             pad_mask = torch.cat([torch.zeros(bsize, self.global_tokens, dtype=torch.bool, device=audio_signal.device), pad_mask], dim=1)
