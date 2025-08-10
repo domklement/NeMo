@@ -263,8 +263,8 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
         self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
         self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", True)
-        self.aux_attr_perp_loss_weight = self._cfg.get("aux_attr_perp_loss_weight", 0.5)
-        self.aux_same_emb_loss_weight = self._cfg.get("aux_same_emb_loss_weight", 0.1)
+        self.aux_attr_perp_loss_weight = self._cfg.get("aux_attr_perp_loss_weight", 0.0)
+        self.aux_same_emb_loss_weight = self._cfg.get("aux_same_emb_loss_weight", 0.0)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -1035,7 +1035,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
 
         # Aux losses
-        aux_attr_labels = torch.eye(10, device=attractors.device, dtype=torch.float32).unsqueeze(0).repeat((targets.shape[0], 1, 1))
+        aux_attr_labels = torch.eye(self.max_num_of_spks, device=attractors.device, dtype=torch.float32).unsqueeze(0).repeat((targets.shape[0], 1, 1))
         attr_cos_sims = torch.bmm((attractors / attractors.norm(dim=-1).unsqueeze(-1)), (attractors / attractors.norm(dim=-1).unsqueeze(-1)).transpose(-1,-2)).float()
         aux_attr_perp_loss = torch.nn.functional.mse_loss(attr_cos_sims, aux_attr_labels)
 
