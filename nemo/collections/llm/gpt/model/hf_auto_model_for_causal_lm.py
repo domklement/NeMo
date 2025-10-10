@@ -20,7 +20,7 @@ import lightning.pytorch as pl
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import _mesh_resources
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM
 
 from nemo.automodel.dist_utils import FirstRankPerNode
 from nemo.automodel.loss import masked_cross_entropy
@@ -106,6 +106,13 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
             enable_grad_ckpt (bool, optional): Enables gradient checkpoints. Defaults to False.
             device_map (str, optional): Device map to use. Defaults to "cpu".
         """
+        from nemo.utils.decorators import deprecated_warning
+
+        deprecated_warning(
+            old_method="Automodel on NVIDIA/NeMo",
+            new_method="https://github.com/NVIDIA-NeMo/Automodel repo",
+            wait_seconds=2,
+        )
         super().__init__()
         self.save_hyperparameters()
         self.model_name = model_name
@@ -189,6 +196,8 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         # create all your layers here
         quantization_config = None
         if self.load_in_4bit:
+            from transformers import BitsAndBytesConfig
+
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -580,6 +589,8 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         }
 
         if self.load_in_4bit:
+            from transformers import BitsAndBytesConfig
+
             d["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",

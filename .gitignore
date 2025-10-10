@@ -183,4 +183,8 @@ jupyters/data/*
 
 slurm*.out
 
+# voice agent
+node_modules/
+.vite/
+bot_server.*
 misc/

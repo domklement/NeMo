@@ -173,12 +173,14 @@ def create_packing_strategy(
 
     max_seqlen = max(all_seq_lens)
     max_samples_per_bin = max([len(b) for b in assignments])
+    min_packed_seqlen = min(packed_seq_lens)
     packing_metadata = {
         "dataset_max_seqlen": max_seqlen,
         "max_samples_per_bin": max_samples_per_bin,
         "packing_factor": round(packing_factor, 2),
         "packing_efficiency": round(sum(packed_seq_lens) / len(packed_seq_lens) / pack_size * 100, 2),
         "pack_size": pack_size,
+        'min_packed_seqlen': min_packed_seqlen,
     }
     logging.debug("Packed sequence lengths:")
     logging.debug(packed_seq_lens)
@@ -223,6 +225,8 @@ def fill_packing_strategy(
             input_ids = np.array([x["input_ids"] for x in per_seq_data])[perm].tolist()
             try:
                 loss_mask = np.array([x["loss_mask"] for x in per_seq_data])[perm].tolist()
+                # roll loss mask by 1 to align with labels. We want to train on the output after the last context token
+                loss_mask = [x[1:] + [False] for x in loss_mask]
             except KeyError:
                 try:
                     loss_mask = np.array(
@@ -230,7 +234,7 @@ def fill_packing_strategy(
                             [
                                 # (x['answer_start_idx'] - 1) because we want to train on the output
                                 # after the last context token
-                                idx >= (x["answer_start_idx"] - 1) and x["input_ids"][idx] != pad_id
+                                idx >= (x["answer_start_idx"] - 1)
                                 for idx in range(len(x["input_ids"]))
                             ]
                             for x in per_seq_data
