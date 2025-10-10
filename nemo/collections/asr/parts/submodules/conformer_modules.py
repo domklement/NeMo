@@ -134,7 +134,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
                 global_attn_separate=global_attn_separate,
                 use_bias=use_bias,
             )
-        elif self_attention_model == 'abs_pos':
+        elif self_attention_model == 'abs_pos' or self_attention_model == 'no_pos_emb':
             self.self_attn = MultiHeadAttention(
                 n_head=n_heads,
                 n_feat=d_model,
@@ -181,7 +181,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
             x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)
         elif self.self_attention_model == 'rel_pos_local_attn':
             x = self.self_attn(query=x, key=x, value=x, pad_mask=pad_mask, pos_emb=pos_emb, cache=cache_last_channel)
-        elif self.self_attention_model == 'abs_pos':
+        elif self.self_attention_model == 'abs_pos' or self.self_attention_model == 'no_pos_emb':
             x = self.self_attn(query=x, key=x, value=x, mask=att_mask, cache=cache_last_channel)
         else:
             x = None

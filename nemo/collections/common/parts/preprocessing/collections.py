@@ -205,6 +205,135 @@ class AudioText(_Collection):
         super().__init__(data)
 
 
+class AudioTextSTNO(_Collection):
+    """List of audio-transcript text correspondence with preprocessing."""
+
+    OUTPUT_TYPE = collections.namedtuple(
+        typename='AudioTextEntity',
+        field_names='id audio_file duration text_tokens offset text_raw speaker orig_sr lang',
+    )
+
+    def __init__(
+        self,
+        ids: List[int],
+        audio_files: List[str],
+        durations: List[float],
+        texts: List[str],
+        offsets: List[str],
+        speakers: List[Optional[int]],
+        orig_sampling_rates: List[Optional[int]],
+        token_labels: List[Optional[int]],
+        langs: List[Optional[str]],
+        parser: parsers.CharParser,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        max_number: Optional[int] = None,
+        do_sort_by_duration: bool = False,
+        index_by_file_id: bool = False,
+    ):
+        """Instantiates audio-text manifest with filters and preprocessing.
+
+        Args:
+            ids: List of examples positions.
+            audio_files: List of audio files.
+            durations: List of float durations.
+            texts: List of raw text transcripts.
+            offsets: List of duration offsets or None.
+            speakers: List of optional speakers ids.
+            orig_sampling_rates: List of original sampling rates of audio files.
+            langs: List of language ids, one for eadh sample, or None.
+            parser: Instance of `CharParser` to convert string to tokens.
+            min_duration: Minimum duration to keep entry with (default: None).
+            max_duration: Maximum duration to keep entry with (default: None).
+            max_number: Maximum number of samples to collect.
+            do_sort_by_duration: True if sort samples list by duration. Not compatible with index_by_file_id.
+            index_by_file_id: If True, saves a mapping from filename base (ID) to index in data.
+        """
+
+        output_type = self.OUTPUT_TYPE
+        all_has_duration = True
+        data, duration_filtered, num_filtered, total_duration = [], 0.0, 0, 0.0
+        if index_by_file_id:
+            self.mapping = {}
+
+        for id_, audio_file, duration, offset, text, speaker, orig_sr, token_labels, lang in zip(
+            ids, audio_files, durations, offsets, texts, speakers, orig_sampling_rates, token_labels, langs
+        ):
+            if duration is None:
+                all_has_duration = False
+            # Duration filters.
+            if duration is not None and min_duration is not None and duration < min_duration:
+                duration_filtered += duration
+                num_filtered += 1
+                continue
+
+            if duration is not None and max_duration is not None and duration > max_duration:
+                duration_filtered += duration
+                num_filtered += 1
+                continue
+
+            if token_labels is not None:
+                text_tokens = token_labels
+            else:
+                if text != '':
+                    if hasattr(parser, "is_aggregate") and parser.is_aggregate and isinstance(text, str):
+                        if lang is not None:
+                            text_tokens = parser(text, lang)
+                        # for future use if want to add language bypass to audio_to_text classes
+                        # elif hasattr(parser, "lang") and parser.lang is not None:
+                        #    text_tokens = parser(text, parser.lang)
+                        else:
+                            raise ValueError("lang required in manifest when using aggregate tokenizers")
+                    else:
+                        # Text is actually a list containing {start, duration, speaker, text} - MultiTalker data...
+                        # text_tokens = parser(text)
+                        text_tokens = []
+                        new_text = []
+                        for text_entry in text:
+                            parsed = parser(text_entry['text'])
+                            if parsed:
+                                text_tokens.append({
+                                    'start': text_entry['start'],
+                                    'duration': text_entry['duration'],
+                                    'speaker': text_entry['speaker'],
+                                    'text': parsed,
+                                })
+                                new_text.append(text_entry)
+                        text = new_text
+                else:
+                    text_tokens = []
+
+                if text_tokens is None:
+                    duration_filtered += duration
+                    num_filtered += 1
+                    continue
+
+            total_duration += duration if duration is not None else 0.0
+
+            data.append(output_type(id_, audio_file, duration, text_tokens, offset, text, speaker, orig_sr, lang))
+            if index_by_file_id:
+                file_id, _ = os.path.splitext(os.path.basename(audio_file))
+                if file_id not in self.mapping:
+                    self.mapping[file_id] = []
+                self.mapping[file_id].append(len(data) - 1)
+
+            # Max number of entities filter.
+            if len(data) == max_number:
+                break
+
+        if do_sort_by_duration:
+            if index_by_file_id:
+                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+            else:
+                data.sort(key=lambda entity: entity.duration)
+
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        if not all_has_duration:
+            logging.info(f"Not all audios have duration information, the total number of hours is inaccurate.")
+        super().__init__(data)
+
+
 class VideoText(_Collection):
     """List of video-transcript text correspondence with preprocessing."""
 
@@ -314,6 +443,49 @@ class VideoText(_Collection):
 
 
 class ASRAudioText(AudioText):
+    """`AudioText` collector from asr structured json files."""
+
+    def __init__(self, manifests_files: Union[str, List[str]], parse_func: Optional[Callable] = None, *args, **kwargs):
+        """Parse lists of audio files, durations and transcripts texts.
+
+        Args:
+            manifests_files: Either single string file or list of such -
+                manifests to yield items from.
+            *args: Args to pass to `AudioText` constructor.
+            **kwargs: Kwargs to pass to `AudioText` constructor.
+        """
+
+        (
+            ids,
+            audio_files,
+            durations,
+            texts,
+            offsets,
+        ) = (
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+
+        speakers, orig_srs, token_labels, langs = [], [], [], []
+        for item in manifest.item_iter(manifests_files, parse_func=parse_func):
+            ids.append(item['id'])
+            audio_files.append(item['audio_file'])
+            durations.append(item['duration'])
+            texts.append(item['text'])
+            offsets.append(item['offset'])
+            speakers.append(item['speaker'])
+            orig_srs.append(item['orig_sr'])
+            token_labels.append(item['token_labels'])
+            langs.append(item['lang'])
+        super().__init__(
+            ids, audio_files, durations, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
+        )
+
+
+class ASRAudioTextSTNO(AudioTextSTNO):
     """`AudioText` collector from asr structured json files."""
 
     def __init__(self, manifests_files: Union[str, List[str]], parse_func: Optional[Callable] = None, *args, **kwargs):

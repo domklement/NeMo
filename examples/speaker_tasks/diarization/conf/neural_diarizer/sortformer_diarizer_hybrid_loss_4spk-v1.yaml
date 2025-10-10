@@ -5,7 +5,7 @@
 # Example: a manifest line for training 
 # {"audio_filepath": "/path/to/audio01.wav", "offset": 390.83, "duration": 90.00, "text": "-", "num_speakers": 2, "rttm_filepath": "/path/to/audio01.rttm"}
 name: "SortFormerDiarizer"
-num_workers: 18
+num_workers: 8
 batch_size: 8
 
 model: 
@@ -38,7 +38,7 @@ model:
     pin_memory: True
     min_duration: 10
     max_duration: 90
-    batch_duration: 400
+    batch_duration: 1080
     quadratic_duration: 1200
     bucket_buffer_size: 20000
     shuffle_buffer_size: 10000
@@ -162,9 +162,10 @@ trainer:
   max_epochs: 800
   max_steps: -1 # computed at runtime if not set
   num_nodes: 1
-  strategy: ddp_find_unused_parameters_true # Could be "ddp"
+  strategy: ddp # Could be "ddp"
   accumulate_grad_batches: 1
-  deterministic: True
+  deterministic: False
+  precision: bf16 # 16, 32, or bf16
   enable_checkpointing: False
   logger: False
   log_every_n_steps: 1  # Interval of logging.
@@ -186,6 +187,6 @@ exp_manager:
     save_top_k: 9
     every_n_epochs: 1
   wandb_logger_kwargs:
-    resume: True
+    resume: False
     name: null
     project: null

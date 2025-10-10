@@ -655,6 +655,7 @@ class RelPositionMultiHeadAttentionLongformer(RelPositionMultiHeadAttention):
         key_only_global[is_local_index_global_attn_nonzero] = key[is_index_global_attn_nonzero]
 
         # (batch_size, seq_len, head, max_num_global_attn_indices)
+        # Computes dot-prod between query - input acoustic sequence, and global keys (global tokens).
         attn_probs_from_global_key = torch.einsum("blhd,bshd->blhs", (query, key_only_global))
 
         # need to transpose since ONNX export only supports consecutive indexing: https://pytorch.org/docs/stable/onnx.html#writes-sets
@@ -1051,6 +1052,35 @@ class PositionalEncoding(torch.nn.Module):
             pos_emb = self.dropout_emb(pos_emb)
         x = x + pos_emb
         return self.dropout(x), pos_emb
+    
+
+class NoPositionalEncoding(PositionalEncoding):
+    """Relative positional encoding for TransformerXL's layers
+    See : Appendix B in https://arxiv.org/abs/1901.02860
+    Args:
+        d_model (int): embedding dim
+        dropout_rate (float): dropout rate
+        max_len (int): maximum input length
+        xscale (bool): whether to scale the input by sqrt(d_model)
+        dropout_rate_emb (float): dropout rate for the positional embeddings
+    """
+
+    def extend_pe(self, length, device, dtype):
+        pass
+
+    def forward(self, x, cache_len=0):
+        """Compute positional encoding.
+        Args:
+            x (torch.Tensor): Input. Its shape is (batch, time, feature_size)
+            cache_len (int): the size of the cache which is used to shift positions
+        Returns:
+            x (torch.Tensor): Its shape is (batch, time, feature_size)
+            pos_emb (torch.Tensor): Its shape is (1, time, feature_size)
+        """
+        if self.xscale:
+            x = x * self.xscale
+
+        return self.dropout(x), None
 
 
 class RelPositionalEncoding(PositionalEncoding):

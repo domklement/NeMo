@@ -858,9 +858,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             (dict): A dictionary containing the 'loss' key with the calculated loss value.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, _, _, _ = batch
         preds = self.forward(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
-        train_metrics = self._get_aux_train_evaluations(preds, targets, target_lens)
+        with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
+            train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens)
         self._reset_train_metrics()
         self.log_dict(train_metrics, sync_dist=True, on_step=True, on_epoch=False, logger=True)
         return {'loss': train_metrics['loss']}
@@ -940,12 +941,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             dict: A dictionary containing various validation metrics for this batch.
         """
-        audio_signal, audio_signal_length, targets, target_lens = batch
+        audio_signal, audio_signal_length, targets, target_lens, _, _, _ = batch
         preds = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
         )
-        val_metrics = self._get_aux_validation_evaluations(preds, targets, target_lens)
+        with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
+            val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens)
         if isinstance(self.trainer.val_dataloaders, list) and len(self.trainer.val_dataloaders) > 1:
             self.validation_step_outputs[dataloader_idx].append(val_metrics)
         else:

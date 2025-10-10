@@ -21,9 +21,12 @@ from nemo.collections.asr.models.classification_models import (
 )
 from nemo.collections.asr.models.clustering_diarizer import ClusteringDiarizer
 from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
+from nemo.collections.asr.models.ctc_bpe_models_stno import EncDecCTCModelBPESTNO
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel
+from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_stno import EncDecHybridRNNTCTCBPEModelSTNO
 from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel
+from nemo.collections.asr.models.hybrid_rnnt_ctc_models_stno import EncDecHybridRNNTCTCModelSTNO
 from nemo.collections.asr.models.k2_sequence_models import (
     EncDecK2RnntSeqModel,
     EncDecK2RnntSeqModelBPE,
@@ -33,7 +36,9 @@ from nemo.collections.asr.models.k2_sequence_models import (
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
 from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel, NeuralDiarizer
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
+from nemo.collections.asr.models.rnnt_bpe_models_stno import EncDecRNNTBPEModelSTNO
 from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
+from nemo.collections.asr.models.rnnt_models_stno import EncDecRNNTModelSTNO
 from nemo.collections.asr.models.slu_models import SLUIntentSlotBPEModel
 from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
 from nemo.collections.asr.models.ssl_models import (

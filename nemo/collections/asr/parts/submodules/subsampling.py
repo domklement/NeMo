@@ -22,6 +22,64 @@ from nemo.collections.asr.parts.submodules.causal_convs import CausalConv1D, Cau
 from nemo.utils import logging
 
 
+class StackOverlapSubsampling(torch.nn.Module):
+    def __init__(self, subsampling_factor, feat_in, feat_out, norm=False, context_size=7):
+        super(StackOverlapSubsampling, self).__init__()
+        self.subsampling_factor = subsampling_factor
+        self.context_size = context_size
+        self.proj_out = torch.nn.Linear((2*context_size+1) * feat_in, feat_out)
+        if norm:
+            self.pre_norm = LayerNorm(feat_in)
+        else:
+            self.pre_norm = None
+
+    def get_sampling_frames(self):
+        return self.subsampling_factor
+
+    def get_streaming_cache_size(self):
+        return 0
+
+    def forward(self, x, lengths):
+        b, t, h = x.size()
+        lengths = torch.ceil(lengths / self.subsampling_factor).to(torch.int64)
+        x = self._splice(x, self.context_size)
+        x = self._subsample(x)
+        x = self.proj_out(x)
+        return x, lengths
+
+    def _splice(self, Y: torch.Tensor, context_size: int = 0) -> torch.Tensor:
+        """
+        Frame splicing in PyTorch for batched input.
+        
+        Args:
+            Y: Tensor of shape (B, F, T)
+            context_size: Number of frames to include on each side (left & right)
+        
+        Returns:
+            Tensor of shape (B, F * (2 * context_size + 1), T)
+        """
+        if context_size == 0:
+            return Y
+    
+        B, T, F = Y.shape
+        total_context = 2 * context_size + 1
+    
+        # Pad along the time dimension (last dim)
+        Y_padded = torch.nn.functional.pad(Y, (0, 0, context_size, context_size), mode='constant', value=0)
+    
+        # Collect context slices
+        spliced = []
+        for i in range(total_context):
+            spliced.append(Y_padded[:, i:i + T, :])  # shape: (B, F, T)
+    
+        # Concatenate along feature dimension
+        Y_spliced = torch.cat(spliced, dim=-1)  # shape: (B, F * total_context, T)
+        return Y_spliced
+
+    def _subsample(self, Y: torch.Tensor):
+        return Y[:, ::self.subsampling_factor, :]
+
+
 class StackingSubsampling(torch.nn.Module):
     """Stacking subsampling which simply stacks consecutive frames to reduce the sampling rate
     Args:

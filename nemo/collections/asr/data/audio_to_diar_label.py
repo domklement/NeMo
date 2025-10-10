@@ -1264,7 +1264,7 @@ class _AudioToSpeechE2ESpkDiarDataset(Dataset):
         else:
             session_len_sec = min(sample.duration, self.session_len_sec)
 
-        audio_signal = self.featurizer.process(sample.audio_file, offset=offset, duration=session_len_sec)
+        audio_signal = self.featurizer.process(sample.audio_file, offset=offset, duration=session_len_sec, channel_selector='average')
 
         # We should resolve the length mis-match from the round-off errors between these two variables:
         # `session_len_sec` and `audio_signal.shape[0]`
@@ -1414,6 +1414,418 @@ class AudioToSpeechE2ESpkDiarDataset(_AudioToSpeechE2ESpkDiarDataset):
             global_rank=global_rank,
             soft_targets=soft_targets,
             device=device,
+        )
+
+    def eesd_train_collate_fn(self, batch):
+        """Collate a batch of data for end-to-end speaker diarization training."""
+        return _eesd_train_collate_fn(self, batch)
+
+
+class _AudioToSpeechE2ESpkDiarRandomChunkDataset(Dataset):
+    """
+    Dataset class that loads a json file containing paths to audio files,
+    RTTM files and number of speakers. This Dataset class is designed for
+    training or fine-tuning speaker embedding extractor and diarization decoder
+    at the same time.
+
+    Example:
+    {"audio_filepath": "/path/to/audio_0.wav", "num_speakers": 2,
+    "rttm_filepath": "/path/to/diar_label_0.rttm}
+    ...
+    {"audio_filepath": "/path/to/audio_n.wav", "num_speakers": 2,
+    "rttm_filepath": "/path/to/diar_label_n.rttm}
+
+    Args:
+        manifest_filepath (str):
+            Path to input manifest json files.
+        multiargs_dict (dict):
+            Dictionary containing the parameters for multiscale segmentation and clustering.
+        soft_label_thres (float):
+            Threshold that determines the label of each segment based on RTTM file information.
+        featurizer:
+            Featurizer instance for generating audio_signal from the raw waveform.
+        window_stride (float):
+            Window stride for acoustic feature. This value is used for calculating the numbers of feature-level frames.
+    """
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports."""
+        output_types = {
+            "audio_signal": NeuralType(('B', 'T'), AudioSignal()),
+            "audio_length": NeuralType(('B'), LengthsType()),
+            "targets": NeuralType(('B', 'T', 'C'), ProbsType()),
+            "target_len": NeuralType(('B'), LengthsType()),
+            "uniq_ids": NeuralType(('B'), LengthsType()),
+            "offsets": NeuralType(('B'), LengthsType()),
+        }
+
+        return output_types
+
+    def __init__(
+        self,
+        *,
+        manifest_filepath: str,
+        soft_label_thres: float,
+        session_len_sec: float,
+        num_spks: int,
+        featurizer,
+        window_stride: float,
+        min_subsegment_duration: float = 0.03,
+        global_rank: int = 0,
+        dtype=torch.float16,
+        round_digits: int = 2,
+        soft_targets: bool = False,
+        subsampling_factor: int = 8,
+        device: str = 'cpu',
+        equalize_recording_lengths: bool = True,
+    ):
+        super().__init__()
+        self.collection = EndtoEndDiarizationSpeechLabel(
+            manifests_files=manifest_filepath.split(','),
+            round_digits=round_digits,
+        )
+
+        self.featurizer = featurizer
+        self.round_digits = round_digits
+        self.feat_per_sec = int(1 / window_stride)
+        self.diar_frame_length = round(subsampling_factor * window_stride, round_digits)
+        self.session_len_sec = session_len_sec
+        self.soft_label_thres = soft_label_thres
+        self.max_spks = num_spks
+        self.min_subsegment_duration = min_subsegment_duration
+        self.dtype = dtype
+        self.use_asr_style_frame_count = True
+        self.soft_targets = soft_targets
+        self.round_digits = 2
+        self.floor_decimal = 10**self.round_digits
+        self.device = device
+        self.equalize_recording_lengths = equalize_recording_lengths
+
+        if self.equalize_recording_lengths:
+            from copy import deepcopy
+            min_len = min([sample.duration for sample in self.collection])
+            new_samples = []
+            for sample in self.collection:
+                ratio = int(sample.duration / min_len)
+                if ratio > 1:
+                    for _ in range(ratio-1):
+                        # Deepcopy ensures that we can treat each sample as a unique object => eliminates unwanted side effects.
+                        new_samples.append(deepcopy(sample))
+            self.collection.extend(new_samples)
+
+    def __len__(self):
+        return len(self.collection)
+
+    def get_uniq_id_with_range(self, sample, deci=3):
+        """
+        Generate unique training sample ID from unique file ID, offset and duration. The start-end time added
+        unique ID is required for identifying the sample since multiple short audio samples are generated from a single
+        audio file. The start time and end time of the audio stream uses millisecond units if `deci=3`.
+
+        Args:
+            sample:
+                `DiarizationSpeechLabel` instance from collections.
+
+        Returns:
+            uniq_id (str):
+                Unique sample ID which includes start and end time of the audio stream.
+                Example: abc1001_3122_6458
+        """
+        bare_uniq_id = os.path.splitext(os.path.basename(sample.rttm_file))[0]
+        offset = str(int(round(sample.offset, deci) * pow(10, deci)))
+        endtime = str(int(round(sample.offset + sample.duration, deci) * pow(10, deci)))
+        uniq_id = f"{bare_uniq_id}_{offset}_{endtime}"
+        return uniq_id
+
+    def parse_rttm_for_targets_and_lens(self, rttm_file, offset, duration, target_len):
+        """
+        Generate target tensor variable by extracting groundtruth diarization labels from an RTTM file.
+        This function converts (start, end, speaker_id) format into base-scale (the finest scale) segment level
+        diarization label in a matrix form.
+
+        Example of seg_target:
+            [[0., 1.], [0., 1.], [1., 1.], [1., 0.], [1., 0.], ..., [0., 1.]]
+        """
+        if rttm_file in [None, '']:
+            num_seg = torch.max(target_len)
+            targets = torch.zeros(num_seg, self.max_spks)
+            return targets
+
+        with open(rttm_file, 'r') as f:
+            rttm_lines = f.readlines()
+
+        rttm_timestamps, sess_to_global_spkids = extract_frame_info_from_rttm(offset, duration, rttm_lines)
+
+        fr_level_target = get_frame_targets_from_rttm(
+            rttm_timestamps=rttm_timestamps,
+            offset=offset,
+            duration=duration,
+            round_digits=self.round_digits,
+            feat_per_sec=self.feat_per_sec,
+            max_spks=self.max_spks,
+        )
+
+        soft_target_seg = self.get_soft_targets_seg(feat_level_target=fr_level_target, target_len=target_len)
+        if self.soft_targets:
+            step_target = soft_target_seg
+        else:
+            step_target = (soft_target_seg >= self.soft_label_thres).float()
+        return step_target
+
+    def get_soft_targets_seg(self, feat_level_target, target_len):
+        """
+        Generate the final targets for the actual diarization step.
+        Here, frame level means step level which is also referred to as segments.
+        We follow the original paper and refer to the step level as "frames".
+
+        Args:
+            feat_level_target (torch.tensor):
+                Tensor variable containing hard-labels of speaker activity in each feature-level segment.
+            target_len (torch.tensor):
+                Numbers of ms segments
+
+        Returns:
+            soft_target_seg (torch.tensor):
+                Tensor variable containing soft-labels of speaker activity in each step-level segment.
+        """
+        num_seg = torch.max(target_len)
+        targets = torch.zeros(num_seg, self.max_spks)
+        stride = int(self.feat_per_sec * self.diar_frame_length)
+        for index in range(num_seg):
+            if index == 0:
+                seg_stt_feat = 0
+            else:
+                seg_stt_feat = stride * index - 1 - int(stride / 2)
+            if index == num_seg - 1:
+                seg_end_feat = feat_level_target.shape[0]
+            else:
+                seg_end_feat = stride * index - 1 + int(stride / 2)
+            targets[index] = torch.mean(feat_level_target[seg_stt_feat : seg_end_feat + 1, :], axis=0)
+        return targets
+
+    def get_segment_timestamps(
+        self,
+        duration: float,
+        offset: float = 0,
+        sample_rate: int = 16000,
+    ):
+        """
+        Get start and end time of segments in each scale.
+
+        Args:
+            sample:
+                `DiarizationSpeechLabel` instance from preprocessing.collections
+        Returns:
+            segment_timestamps (torch.tensor):
+                Tensor containing Multiscale segment timestamps.
+            target_len (torch.tensor):
+                Number of segments for each scale. This information is used for reshaping embedding batch
+                during forward propagation.
+        """
+        subsegments = get_subsegments(
+            offset=offset,
+            window=round(self.diar_frame_length * 2, self.round_digits),
+            shift=self.diar_frame_length,
+            duration=duration,
+            min_subsegment_duration=self.min_subsegment_duration,
+            use_asr_style_frame_count=self.use_asr_style_frame_count,
+            sample_rate=sample_rate,
+            feat_per_sec=self.feat_per_sec,
+        )
+        if self.use_asr_style_frame_count:
+            effective_dur = (
+                np.ceil((1 + duration * sample_rate) / int(sample_rate / self.feat_per_sec)).astype(int)
+                / self.feat_per_sec
+            )
+        else:
+            effective_dur = duration
+        ts_tensor = get_subsegments_to_timestamps(
+            subsegments, self.feat_per_sec, decimals=2, max_end_ts=(offset + effective_dur)
+        )
+        target_len = torch.tensor([ts_tensor.shape[0]])
+        return target_len
+
+    def __getitem__(self, index):
+        sample = self.collection[index]
+        offset = sample.offset
+        duration = sample.duration
+        assert duration > 0
+        
+        if duration - 1 > self.session_len_sec:
+            rand_offset = np.random.randint(0, duration - self.session_len_sec)
+            duration = self.session_len_sec
+            offset += rand_offset
+
+        # print(f"offset: {offset}, duration: {duration}")
+
+        audio_signal = self.featurizer.process(sample.audio_file, offset=offset, duration=duration, channel_selector='average')
+
+        # We should resolve the length mis-match from the round-off errors between these two variables:
+        # `session_len_sec` and `audio_signal.shape[0]`
+        session_len_sec = (
+            np.floor(audio_signal.shape[0] / self.featurizer.sample_rate * self.floor_decimal) / self.floor_decimal
+        )
+        audio_signal = audio_signal[: round(self.featurizer.sample_rate * session_len_sec)]
+        audio_signal_length = torch.tensor(audio_signal.shape[0]).long()
+        target_len = self.get_segment_timestamps(duration=session_len_sec, sample_rate=self.featurizer.sample_rate)
+        targets = self.parse_rttm_for_targets_and_lens(
+            rttm_file=sample.rttm_file, offset=offset, duration=session_len_sec, target_len=target_len
+        )
+        return audio_signal, audio_signal_length, targets, target_len, sample.uniq_id, torch.tensor(offset), sample.rttm_file
+
+
+def _eesd_train_collate_fn(self, batch):
+    """
+    Collate a batch of variables needed for training the end-to-end speaker diarization (EESD) model
+    from raw waveforms to diarization labels. The following variables are included in the training/validation batch:
+
+    Args:
+        batch (tuple):
+            A tuple containing the variables for diarization training.
+
+    Returns:
+        audio_signal (torch.Tensor):
+            A tensor containing the raw waveform samples (time series) loaded from the `audio_filepath`
+            in the input manifest file.
+        feature_length (torch.Tensor):
+            A tensor containing the lengths of the raw waveform samples.
+        targets (torch.Tensor):
+            Groundtruth speaker labels for the given input embedding sequence.
+        target_lens (torch.Tensor):
+            A tensor containing the number of segments for each sample in the batch, necessary for
+            reshaping inputs to the EESD model.
+    """
+    packed_batch = list(zip(*batch))
+    if len(packed_batch) == 4:
+        audio_signal, feature_length, targets, target_len = packed_batch
+        uniq_ids = [None] * len(audio_signal)
+        offsets = [None] * len(audio_signal)
+        rttm_files = [None] * len(audio_signal)
+    else:
+        audio_signal, feature_length, targets, target_len, uniq_ids, offsets, rttm_files = packed_batch
+
+    audio_signal_list, feature_length_list = [], []
+    target_len_list, targets_list = [], []
+    uniq_ids_list = []
+    rttm_files_list = []
+    offsets_list = []
+    max_raw_feat_len = max([x.shape[0] for x in audio_signal])
+    max_target_len = max([x.shape[0] for x in targets])
+    if max([len(feat.shape) for feat in audio_signal]) > 1:
+        max_ch = max([feat.shape[1] for feat in audio_signal])
+    else:
+        max_ch = 1
+    for b in batch:
+        if len(b) == 4:
+            feat, feat_len, tgt, segment_ct = b
+            uniq_id = torch.empty(1)
+            offset = torch.empty(1)
+            rttm_file = torch.empty(1)
+        else:
+            feat, feat_len, tgt, segment_ct, uniq_id, offset, rttm_file = b
+        seq_len = tgt.shape[0]
+        if len(feat.shape) > 1:
+            pad_feat = (0, 0, 0, max_raw_feat_len - feat.shape[0])
+        else:
+            pad_feat = (0, max_raw_feat_len - feat.shape[0])
+        if feat.shape[0] < feat_len:
+            feat_len_pad = feat_len - feat.shape[0]
+            feat = torch.nn.functional.pad(feat, (0, feat_len_pad))
+        pad_tgt = (0, 0, 0, max_target_len - seq_len)
+        padded_feat = torch.nn.functional.pad(feat, pad_feat)
+        padded_tgt = torch.nn.functional.pad(tgt, pad_tgt)
+        if max_ch > 1 and padded_feat.shape[1] < max_ch:
+            feat_ch_pad = max_ch - padded_feat.shape[1]
+            padded_feat = torch.nn.functional.pad(padded_feat, (0, feat_ch_pad))
+        audio_signal_list.append(padded_feat)
+        feature_length_list.append(feat_len.clone().detach())
+        target_len_list.append(segment_ct.clone().detach())
+        targets_list.append(padded_tgt)
+        uniq_ids_list.append(uniq_id)
+        offsets_list.append(offset)
+        rttm_files_list.append(rttm_file)
+        audio_signal = torch.stack(audio_signal_list)
+    feature_length = torch.stack(feature_length_list)
+    target_lens = torch.stack(target_len_list).squeeze(1)
+    targets = torch.stack(targets_list)
+    offsets = torch.stack(offsets_list)
+    return audio_signal, feature_length, targets, target_lens, uniq_ids, offsets, rttm_files_list
+
+
+class AudioToSpeechE2ESpkDiarRandomChunkDataset(_AudioToSpeechE2ESpkDiarRandomChunkDataset):
+    """
+    Dataset class for loading a JSON file containing paths to audio files,
+    RTTM (Rich Transcription Time Marked) files, and the number of speakers.
+    This class is designed for training or fine-tuning a speaker embedding
+    extractor and diarization decoder simultaneously.
+
+    The JSON manifest file should have entries in the following format:
+
+    Example:
+    {
+        "audio_filepath": "/path/to/audio_0.wav",
+        "num_speakers": 2,
+        "rttm_filepath": "/path/to/diar_label_0.rttm"
+    }
+    ...
+    {
+        "audio_filepath": "/path/to/audio_n.wav",
+        "num_speakers": 2,
+        "rttm_filepath": "/path/to/diar_label_n.rttm"
+    }
+
+    Args:
+        manifest_filepath (str):
+            Path to the input manifest JSON file containing paths to audio and RTTM files.
+        soft_label_thres (float):
+            Threshold for assigning soft labels to segments based on RTTM file information.
+        session_len_sec (float):
+            Duration of each session (in seconds) for training or fine-tuning.
+        num_spks (int):
+            Number of speakers in the audio files.
+        featurizer:
+            Instance of a featurizer for generating features from the raw waveform.
+        window_stride (float):
+            Window stride (in seconds) for extracting acoustic features, used to calculate
+            the number of feature frames.
+        global_rank (int):
+            Global rank of the current process (used for distributed training).
+        soft_targets (bool):
+            Whether or not to use soft targets during training.
+
+    Methods:
+        eesd_train_collate_fn(batch):
+            Collates a batch of data for end-to-end speaker diarization training.
+    """
+
+    def __init__(
+        self,
+        *,
+        manifest_filepath: str,
+        soft_label_thres: float,
+        session_len_sec: float,
+        num_spks: int,
+        featurizer,
+        window_stride,
+        global_rank: int,
+        soft_targets: bool,
+        device: str,
+        equalize_recording_lengths: bool = True,
+        subsampling_factor: int = 8,
+    ):
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            soft_label_thres=soft_label_thres,
+            session_len_sec=session_len_sec,
+            num_spks=num_spks,
+            featurizer=featurizer,
+            window_stride=window_stride,
+            global_rank=global_rank,
+            soft_targets=soft_targets,
+            device=device,
+            equalize_recording_lengths=equalize_recording_lengths,
+            subsampling_factor=subsampling_factor,
         )
 
     def eesd_train_collate_fn(self, batch):

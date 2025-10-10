@@ -15,9 +15,13 @@
 import math
 from typing import Optional, Union
 
+import numpy as np
 import torch
 from lhotse import SupervisionSet
 from lhotse.cut import MixedCut, MonoCut
+from scipy.optimize import linear_sum_assignment
+from torch.nn.functional import logsigmoid
+
 
 
 def find_first_nonzero(mat: torch.Tensor, max_cap_val=-1, thres: float = 0.5) -> torch.Tensor:
@@ -174,6 +178,45 @@ def get_pil_targets(labels: torch.Tensor, preds: torch.Tensor, speaker_permutati
     # Reconstruct labels based on the best permutation for each batch
     max_score_permed_labels = reconstruct_labels(labels, batch_perm_inds)  # (batch_size, num_speakers, num_classes)
     return max_score_permed_labels  # (batch_size, num_speakers, num_classes)
+
+
+def get_pil_targets_hungarian(labels: torch.Tensor, preds: torch.Tensor, n_speakers: torch.Tensor, return_perm_inds: bool = False, use_bce_for_cost_mx_construction=False, max_n_speakers: int = None, input_is_probs: bool = True) -> torch.Tensor:
+    if use_bce_for_cost_mx_construction:
+        cost_mxs = torch.empty((labels.shape[0], labels.shape[-1], labels.shape[-1]), device=labels.device)
+        for k in range(labels.shape[0]):
+            for i in range(labels.shape[-1]):
+                for j in range(labels.shape[-1]):
+                    if input_is_probs:
+                        cost_mxs[k, i, j] = torch.nn.functional.binary_cross_entropy(preds[k, :, i].unsqueeze(1).unsqueeze(0), labels[k, :, j].unsqueeze(1).unsqueeze(0))
+                    else:
+                        cost_mxs[k, i, j] = torch.nn.functional.binary_cross_entropy_with_logits(preds[k, :, i].unsqueeze(1).unsqueeze(0), labels[k, :, j].unsqueeze(1).unsqueeze(0))
+    else:
+        preds_t = preds.detach().transpose(1, 2).double()
+        eps = 1e-8
+        if input_is_probs:
+            cost_mxs = -torch.log(preds_t + eps).bmm(labels.double()) - torch.log(-preds_t + eps).bmm(1-labels.double())
+        else:
+            cost_mxs = -logsigmoid(preds_t).bmm(labels.double()) - logsigmoid(-preds_t).bmm(1-labels.double())
+        
+
+    if max_n_speakers is None:
+        max_n_speakers = max(n_speakers)
+    batch_perm_inds = []
+
+    for i, cost_mx in enumerate(cost_mxs.detach().cpu().numpy()):
+        if max_n_speakers > n_speakers[i]:
+            max_value = np.absolute(cost_mx).sum()
+            cost_mx[-(max_n_speakers-n_speakers[i]):] = max_value
+            cost_mx[:, -(max_n_speakers-n_speakers[i]):] = max_value
+        pred_alig, ref_alig = linear_sum_assignment(cost_mx)
+        assert (np.all(pred_alig == np.arange(preds.shape[-1])))
+        batch_perm_inds.append(ref_alig)
+
+    batch_perm_inds = torch.tensor(batch_perm_inds).to(preds.device)
+    if return_perm_inds:
+        return reconstruct_labels(labels, batch_perm_inds), batch_perm_inds
+    
+    return reconstruct_labels(labels, batch_perm_inds)
 
 
 def find_segments_from_rttm(
