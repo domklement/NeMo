@@ -88,7 +88,7 @@ def main(cfg):
     # trainer.callbacks.append(EvalAtStartCallback())
     init_from_pretrained = cfg.get("init_from_pretrained", None)
     if init_from_pretrained is not None:
-        pretrained_model = ASRModel.from_pretrained(model_name=init_from_pretrained)
+        pretrained_model = ASRModel.from_pretrained(model_name=init_from_pretrained, map_location='cpu')
     
     exp_manager(trainer, cfg.get("exp_manager", None))
     asr_model = EncDecRNNTBPEModelSTNO(cfg=cfg.model, trainer=trainer, tokenizer=pretrained_model.tokenizer)
@@ -100,6 +100,8 @@ def main(cfg):
 
     # Initialize the weights of the model from another model, if provided via config
     asr_model.maybe_init_from_pretrained_checkpoint(cfg)
+
+    # asr_model.change_attention_model(self_attention_model="rel_pos_local_attn", att_context_size=(256, 256))
 
     if cfg.get("decode_only", False):
         trainer.validate(asr_model)

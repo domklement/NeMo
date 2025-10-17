@@ -1,12 +1,15 @@
 #!/bin/bash
 
-num_workers=40
-NUM_MEETINGS=200000
+num_workers=50
+NUM_MEETINGS=100000
 NUM_MEETINGS_PER_WORKER=$((NUM_MEETINGS / num_workers))
-MAX_DURATION=240
+MAX_DURATION=600
 
-TARGET_DIR="/scratch.ssd/dklement/job_11306482.pbs-m1/diar_data/sim_emilia_12k_hours_200k_meetings_240s"
-SRC_MANIFEST="/scratch.ssd/dklement/job_11306482.pbs-m1/emilia_data/emilia_subset/manifests/emilia-train-ihm-cutset_aligned_fixed_sources.jsonl.gz"
+# TARGET_DIR="/scratch.ssd/dklement/job_11306482.pbs-m1/diar_data/sim_emilia_100k_meetings_600s"
+# SRC_MANIFEST="/scratch.ssd/dklement/job_11306482.pbs-m1/emilia_data/emilia_subset_20utt_50kspks_en_only/manifests/emilia-train-ihm-cutset_aligned_fixed_sources_min_dnsmos_3.3_2.jsonl"
+
+TARGET_DIR="/scratch.ssd/dklement/job_11306482.pbs-m1/diar_data/sim_ls_100k_meetings_600s"
+SRC_MANIFEST="/scratch.ssd/dklement/job_11306482.pbs-m1/data/librispeech/librispeech_manifests/librispeech_cuts_train-960h.jsonl.gz"
 
 mkdir -p $TARGET_DIR
 
