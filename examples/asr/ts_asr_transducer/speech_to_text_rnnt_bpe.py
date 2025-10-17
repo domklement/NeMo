@@ -75,11 +75,6 @@ class EvalAtStartCallback(Callback):
         print("Evaluating at start...")
         trainer.validate(pl_module)
 
-# import os
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-# import torch
-# torch.set_float32_matmul_precision('medium')
-
 @hydra_runner(config_path="../conf/fastconformer/hybrid_transducer_ctc", config_name="fastconformer_hybrid_tdt_ctc_bpe_stno")
 def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
