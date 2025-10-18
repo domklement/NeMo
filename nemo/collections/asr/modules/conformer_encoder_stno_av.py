@@ -390,7 +390,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                                                         out_channels=d_model, 
                                                         kernel_size=5, 
                                                         stride=2, 
-                                                        padding=1)
+                                                        padding=2)
         self.visual_ln = nn.LayerNorm(d_model)
 
     @typecheck()

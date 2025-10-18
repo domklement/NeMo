@@ -571,6 +571,10 @@ class _AVTextDataset(Dataset):
         visual_embeds = torch.load(sample.per_spk_feature_files[rand_spk], map_location='cpu')
         if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
             visual_embeds = visual_embeds.unsqueeze(1)
+        start_idx = int(sample.offset * 25) # Assuming 25 fps
+        end_idx = start_idx + int(sample.duration * 25)
+        visual_embeds = visual_embeds[start_idx:end_idx, :, :]
+        # print(sample.offset, sample.duration, start_idx, end_idx, visual_embeds.shape)
         speakers_tokens = []
         downsampled_freq = 16000 / self.audio_downsampling_factor
         downsampled_fl_length = fl if fl % self.audio_downsampling_factor == 0 else fl + (self.audio_downsampling_factor - (fl % self.audio_downsampling_factor))
