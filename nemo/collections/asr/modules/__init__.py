@@ -23,6 +23,7 @@ from nemo.collections.asr.modules.beam_search_decoder import BeamSearchDecoderWi
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder, ConformerEncoderAdapter
 from nemo.collections.asr.modules.conformer_encoder_spk_buffer import ConformerEncoderSpkBuff, ConformerEncoderSpkBuffAdapter
 from nemo.collections.asr.modules.conformer_encoder_stno import ConformerEncoderSTNO, ConformerEncoderSTNOAdapter
+from nemo.collections.asr.modules.conformer_encoder_stno_av import ConformerEncoderSTNOAV
 from nemo.collections.asr.modules.conv_asr import (
     ConvASRDecoder,
     ConvASRDecoderClassification,

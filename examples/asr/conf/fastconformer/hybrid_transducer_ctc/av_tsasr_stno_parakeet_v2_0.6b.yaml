@@ -89,7 +89,7 @@ model:
     time_width: 0.05
 
   encoder:
-    _target_: nemo.collections.asr.modules.ConformerEncoderSTNO
+    _target_: nemo.collections.asr.modules.ConformerEncoderSTNOAV
     feat_in: ${model.preprocessor.features}
     feat_out: -1 # you may set it if you need different output size other than the default d_model
     n_layers: 24

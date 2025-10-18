@@ -176,6 +176,9 @@ def __parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
     if item['feature_file'] is not None:
         item['feature_file'] = get_full_path(audio_file=item['feature_file'], manifest_file=manifest_file)
 
+    if 'per_spk_feature_files' not in item:
+        item['per_spk_feature_files'] = None
+
     item = dict(
         audio_file=item.get('audio_file', None),
         video_file=item.get('video_file', None),
@@ -197,6 +200,7 @@ def __parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
         question=item.get('question', None),
         question_type=item.get('question_type', None),
         task=item.get('task', None),
+        per_spk_feature_files=item.get('per_spk_feature_files', None),
     )
     return item
 
