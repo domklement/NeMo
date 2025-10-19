@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import reduce
 import io
 import json
 import math
@@ -487,10 +488,13 @@ class _AVTextDataset(Dataset):
         channel_selector: Optional[ChannelSelectorType] = None,
         manifest_parse_func: Optional[Callable] = None,
         audio_downsampling_factor: int = 1,
+        max_training_rand_seg_duration: Optional[int] = None,
         val: bool = False,
     ):
         if type(manifest_filepath) == str:
             manifest_filepath = manifest_filepath.split(",")
+
+        self.VIDEO_FPS = 25
 
         # If necessary, cache manifests and audio from object store
         cache_datastore_manifests(manifest_filepaths=manifest_filepath, cache_audio=True)
@@ -517,6 +521,7 @@ class _AVTextDataset(Dataset):
                     self.per_spk_collection.append((sample, s))
             
 
+        self.max_training_rand_seg_duration = max_training_rand_seg_duration
         self.val = val
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
@@ -571,8 +576,8 @@ class _AVTextDataset(Dataset):
         visual_embeds = torch.load(sample.per_spk_feature_files[rand_spk], map_location='cpu')
         if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
             visual_embeds = visual_embeds.unsqueeze(1)
-        start_idx = int(sample.offset * 25) # Assuming 25 fps
-        end_idx = start_idx + int(sample.duration * 25)
+        start_idx = int(sample.offset * self.VIDEO_FPS) # Assuming 25 fps
+        end_idx = start_idx + int(sample.duration * self.VIDEO_FPS)
         visual_embeds = visual_embeds[start_idx:end_idx, :, :]
         # print(sample.offset, sample.duration, start_idx, end_idx, visual_embeds.shape)
         speakers_tokens = []
@@ -588,8 +593,35 @@ class _AVTextDataset(Dataset):
             spk_activity_mask[speakers_idx[tt['speaker']], int(tt['start']*downsampled_freq):int((tt['start'] + tt['duration'])*downsampled_freq)] = 1
         
         stno_mask = self._create_stno_masks(spk_activity_mask, speakers_idx[rand_spk])
-
         t, tl = self.manifest_processor.process_text_by_sample(speakers_tokens)
+
+        """
+        DUMMY subsampling so I can start training ASAP. A proper (more optimal) way of generating random segments will be implemented later.
+        The point is to see if the sample duration is above the required sample duration. 
+        If so, then we need to sample some random {max_lemgth} chunk and select all the words from the target speaker that fall into that chunk.
+        We don't have any word-level alignment, so we need to randomly select some starting segment and then take all the segments within (seg_start, seg_start + max_length). STNO and other tensors can be generated accordingly, same goes for the audio.
+        """
+        if self.max_training_rand_seg_duration is not None and not self.val and \
+                sample.duration > self.max_training_rand_seg_duration:
+
+            segment_start = random.uniform(0, sample.duration - self.max_training_rand_seg_duration)
+            segment_end = segment_start + self.max_training_rand_seg_duration
+
+            visual_embeds = visual_embeds[int(segment_start*self.VIDEO_FPS):int(segment_end*self.VIDEO_FPS), ...]
+            # Temporary assert making sure we're not using any feat extractor apart from loading a raw waveform.
+            assert fl.item() / sample.duration - 16000 < 1
+            f = f[int(segment_start*16000):int(segment_end*16000)]
+            fl = torch.tensor(f.shape[0]).long()
+            stno_sr = 12.5
+            stno_mask = stno_mask[:, int(segment_start*stno_sr):int(segment_end*stno_sr)]
+
+            # Now, we need to select text tokens
+            tt = filter(lambda x: x['speaker'] == rand_spk and x['start'] >= segment_start and x['start'] + x['duration'] <= segment_end, sample.text_tokens)
+            t = reduce(lambda a,b: a + b['text'], tt, [])
+            tl = len(t)
+
+        # if sample.duration > self.max_training_rand_seg_duration:
+        #     print()
 
         if self.return_sample_id:
             output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long(), sample.id, speakers_idx[rand_spk], visual_embeds, torch.tensor(visual_embeds.shape[0]), index
@@ -678,6 +710,7 @@ class AVToBPEAndSTNODataset(_AVTextDataset):
         channel_selector: Optional[ChannelSelectorType] = None,
         manifest_parse_func: Optional[Callable] = None,
         audio_downsampling_factor: int = 1,
+        max_training_rand_seg_duration: Optional[int] = None,
         val: bool = False,
     ):
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
@@ -734,5 +767,6 @@ class AVToBPEAndSTNODataset(_AVTextDataset):
             channel_selector=channel_selector,
             manifest_parse_func=manifest_parse_func,
             audio_downsampling_factor=audio_downsampling_factor,
+            max_training_rand_seg_duration=max_training_rand_seg_duration,
             val=val,
         )

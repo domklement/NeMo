@@ -213,7 +213,9 @@ def get_concat_bpe_dataset(
 
 
 def get_bpe_dataset(
-    config: dict, tokenizer: 'TokenizerSpec', augmentor: Optional['AudioAugmentor'] = None, audio_downsampling_factor: int = 1, val: bool = False
+    config: dict, tokenizer: 'TokenizerSpec', augmentor: Optional['AudioAugmentor'] = None, 
+    audio_downsampling_factor: int = 1, 
+    val: bool = False
 ) -> audio_to_text_and_stno.AudioToBPEAndSTNODataset:
     """
     Instantiates a Byte Pair Encoding / Word Piece Encoding based AudioToBPEDataset.
@@ -240,6 +242,7 @@ def get_bpe_dataset(
         return_sample_id=config.get('return_sample_id', False),
         channel_selector=config.get('channel_selector', None),
         audio_downsampling_factor=audio_downsampling_factor,
+        max_training_rand_seg_duration=config.get('max_training_rand_seg_duration', None),
         val=val,
     )
     return dataset
@@ -845,7 +848,9 @@ def get_audio_to_text_bpe_dataset_from_config(
                 augmentor=augmentor,
             )
         else:
-            dataset = get_bpe_dataset(config=config, tokenizer=tokenizer, augmentor=augmentor, audio_downsampling_factor=audio_downsampling_factor, val=val)
+            dataset = get_bpe_dataset(config=config, tokenizer=tokenizer, augmentor=augmentor, 
+                                      audio_downsampling_factor=audio_downsampling_factor, 
+                                      val=val)
     return dataset
 
 
