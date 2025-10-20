@@ -16,7 +16,7 @@ import math
 import random
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
@@ -25,6 +25,7 @@ from torch import nn
 
 from nemo.collections.asr.models.configs import CacheAwareStreamingConfig
 from nemo.collections.asr.modules.fddt import FDDT
+from nemo.collections.asr.modules.film import FiLM
 from nemo.collections.asr.parts.mixins.streaming import StreamingEncoder
 from nemo.collections.asr.parts.submodules.causal_convs import CausalConv1D
 from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLayer
@@ -60,6 +61,41 @@ from nemo.core.neural_types import (
 from nemo.utils import logging
 
 __all__ = ['ConformerEncoderSTNOAV']
+
+
+class VisualProcessingModule(nn.Module):
+    def __init__(self, d_visual_embeds, d_model, visual_downsampling_factor):
+        super().__init__()
+        self.d_visual_embeds = d_visual_embeds
+        self.d_model = d_model
+        self.visual_downsampling_factor = visual_downsampling_factor
+
+        self.visual_conv_downsampling = torch.nn.Conv1d(in_channels=d_visual_embeds, 
+                                                        out_channels=d_model, 
+                                                        kernel_size=5, 
+                                                        stride=visual_downsampling_factor, 
+                                                        padding=2)
+        self.visual_ln = nn.LayerNorm(d_model)
+
+    def forward(self, visual_embeds, audio_signal):
+        # visual_embeds: (B, T, C, D)
+        visual_embeds = visual_embeds.mean(dim=2)
+        B_v, T_v, D_v = visual_embeds.shape
+        downsampled_visual_embeds = self.visual_conv_downsampling(
+            visual_embeds.permute(0, 2, 1).reshape(B_v, D_v, T_v)
+        ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
+
+        shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1]
+        if shape_diff == 1:
+            downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,1,0,0))
+        elif shape_diff == -1:
+            downsampled_visual_embeds = downsampled_visual_embeds[:, :audio_signal.shape[1], :]
+        elif shape_diff == 0:
+            pass
+        else:
+            raise ValueError('Audio and visual embeddings have different time dimensions even after downsampling: {} vs {}.'.format(audio_signal.shape[1], downsampled_visual_embeds.shape[1]))
+        
+        return downsampled_visual_embeds
 
 
 class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
@@ -340,6 +376,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         d_visual_embeds: int = 1024,
         visual_downsampling_factor: int = 2,
         visual_conditioning_method: str = 'add',
+        vision_conditioning_layers: Optional[Union[List[int], int]] = None,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -385,13 +422,9 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.d_visual_embeds = d_visual_embeds
         self.visual_downsampling_factor = visual_downsampling_factor
         self.visual_conditioning_method = visual_conditioning_method
+        self.vision_conditioning_layers = vision_conditioning_layers
 
-        self.visual_conv_downsampling = torch.nn.Conv1d(in_channels=d_visual_embeds, 
-                                                        out_channels=d_model, 
-                                                        kernel_size=5, 
-                                                        stride=2, 
-                                                        padding=2)
-        self.visual_ln = nn.LayerNorm(d_model)
+        self.visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
 
     @typecheck()
     def forward(
@@ -517,24 +550,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             cache_len = 0
             offset = None
 
-        batch_size = audio_signal.shape[0]
-        # visual_embeds: (B, T, C, D)
-        visual_embeds = visual_embeds.mean(dim=2)
-        B_v, T_v, D_v = visual_embeds.shape
-        downsampled_visual_embeds = self.visual_conv_downsampling(
-            visual_embeds.permute(0, 2, 1).reshape(B_v, D_v, T_v)
-        ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
-
-        shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1]
-        if shape_diff == 1:
-            downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,1,0,0))
-        elif shape_diff == -1:
-            downsampled_visual_embeds = downsampled_visual_embeds[:, :audio_signal.shape[1], :]
-        elif shape_diff == 0:
-            pass
-        else:
-            raise ValueError('Audio and visual embeddings have different time dimensions even after downsampling: {} vs {}.'.format(audio_signal.shape[1], downsampled_visual_embeds.shape[1]))
-
+        downsampled_visual_embeds = self.visual_processing(visual_embeds, audio_signal)
         downsampled_visual_embeds = self.visual_ln(downsampled_visual_embeds)
         audio_signal = audio_signal + downsampled_visual_embeds
 
