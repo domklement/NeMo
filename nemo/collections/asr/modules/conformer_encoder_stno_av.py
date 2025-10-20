@@ -106,12 +106,29 @@ class VisualConditioningModule(nn.Module):
 
         if visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
+        elif visual_conditioning_method == 'cross_attn':
+            self.cross_attn = MultiHeadAttention(
+                n_feat=d_model,
+                n_head=8,
+                dropout_rate=0.1,
+            )
+        elif visual_conditioning_method == 'rel_pos_cross_attn':
+            self.cross_attn = MultiHeadAttention(
+                n_feat=d_model,
+                n_head=8,
+                dropout_rate=0.1,
+            )
+            pass
 
-    def forward(self, audio_signal, visual_embeds):
+    def forward(self, audio_signal, visual_embeds, att_mask=None):
         if self.visual_conditioning_method == 'add':
             conditioned_audio = audio_signal + visual_embeds
         elif self.visual_conditioning_method == 'film':
             conditioned_audio = self.film_layer(audio_signal, visual_embeds)
+        elif self.visual_conditioning_method == 'cross_attn':
+            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
+        elif self.visual_conditioning_method == 'rel_pos_cross_attn':
+            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
         else:
             raise ValueError(f'Unknown visual conditioning method: {self.visual_conditioning_method}')
         
@@ -585,13 +602,6 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             cache_len = 0
             offset = None
 
-        if self.use_pre_pe_visual_conditioning:
-            downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
-            audio_signal = self.pre_pe_visual_conditioning(audio_signal, downsampled_visual_embeds)
-
-        # audio_signal = audio_signal + downsampled_visual_embeds
-        audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
-
         # Create the self-attention and padding masks
         pad_mask, att_mask = self._create_masks(
             att_context_size=cur_att_context_size,
@@ -600,6 +610,22 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             offset=offset,
             device=audio_signal.device,
         )
+
+        if self.use_pre_pe_visual_conditioning:
+            downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
+            audio_signal = self.pre_pe_visual_conditioning(audio_signal, downsampled_visual_embeds, att_mask)
+
+        # audio_signal = audio_signal + downsampled_visual_embeds
+        audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
+
+        # # Create the self-attention and padding masks
+        # pad_mask, att_mask = self._create_masks(
+        #     att_context_size=cur_att_context_size,
+        #     padding_length=padding_length,
+        #     max_audio_length=max_audio_length,
+        #     offset=offset,
+        #     device=audio_signal.device,
+        # )
 
         if cache_last_channel is not None:
             pad_mask = pad_mask[:, cache_len:]
@@ -632,7 +658,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
 
             if self.use_visual_conditioning_on_all_layers:
                 downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
-                audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds)
+                audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds, att_mask)
 
             audio_signal = layer(
                 x=audio_signal,
