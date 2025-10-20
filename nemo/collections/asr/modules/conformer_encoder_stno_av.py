@@ -95,7 +95,27 @@ class VisualProcessingModule(nn.Module):
         else:
             raise ValueError('Audio and visual embeddings have different time dimensions even after downsampling: {} vs {}.'.format(audio_signal.shape[1], downsampled_visual_embeds.shape[1]))
         
-        return downsampled_visual_embeds
+        return self.visual_ln(downsampled_visual_embeds)
+
+
+class VisualConditioningModule(nn.Module):
+    def __init__(self, d_model, visual_conditioning_method):
+        super().__init__()
+        self.d_model = d_model
+        self.visual_conditioning_method = visual_conditioning_method
+
+        if visual_conditioning_method == 'film':
+            self.film_layer = FiLM(d_model)
+
+    def forward(self, audio_signal, visual_embeds):
+        if self.visual_conditioning_method == 'add':
+            conditioned_audio = audio_signal + visual_embeds
+        elif self.visual_conditioning_method == 'film':
+            conditioned_audio = self.film_layer(audio_signal, visual_embeds)
+        else:
+            raise ValueError(f'Unknown visual conditioning method: {self.visual_conditioning_method}')
+        
+        return conditioned_audio
 
 
 class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
@@ -374,9 +394,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         use_pytorch_sdpa_backends=None,
         sync_max_audio_length: bool = True,
         d_visual_embeds: int = 1024,
-        visual_downsampling_factor: int = 2,
-        visual_conditioning_method: str = 'add',
-        vision_conditioning_layers: Optional[Union[List[int], int]] = None,
+        visual_downsampling_factor: int = 2, # by default, video is 25fps, audio feats are downsampled to 12.5fps.
+        visual_conditioning_method: str = 'add', # add, film
+        use_pre_pe_visual_conditioning: bool = True,
+        use_visual_conditioning_on_all_layers: bool = False,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -422,9 +443,23 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.d_visual_embeds = d_visual_embeds
         self.visual_downsampling_factor = visual_downsampling_factor
         self.visual_conditioning_method = visual_conditioning_method
-        self.vision_conditioning_layers = vision_conditioning_layers
+        self.use_pre_pe_visual_conditioning = use_pre_pe_visual_conditioning
+        self.use_visual_conditioning_on_all_layers = use_visual_conditioning_on_all_layers
+        
+        if self.use_pre_pe_visual_conditioning:
+            self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
+            self.pre_pe_visual_conditioning = VisualConditioningModule(d_model, visual_conditioning_method)
 
-        self.visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
+
+        if self.use_visual_conditioning_on_all_layers:
+            self.processing_modules = nn.ModuleList([
+                VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
+                for _ in range(n_layers)
+            ])
+            self.conditioning_modules = nn.ModuleList([
+                VisualConditioningModule(d_model, visual_conditioning_method)
+                for _ in range(n_layers)
+            ])
 
     @typecheck()
     def forward(
@@ -550,9 +585,9 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             cache_len = 0
             offset = None
 
-        downsampled_visual_embeds = self.visual_processing(visual_embeds, audio_signal)
-        downsampled_visual_embeds = self.visual_ln(downsampled_visual_embeds)
-        audio_signal = audio_signal + downsampled_visual_embeds
+        if self.use_pre_pe_visual_conditioning:
+            downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
+            audio_signal = self.pre_pe_visual_conditioning(audio_signal, downsampled_visual_embeds)
 
         # audio_signal = audio_signal + downsampled_visual_embeds
         audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
@@ -594,6 +629,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
 
             if stno_mask is not None:
                 audio_signal = self.fddts[lth](audio_signal, stno_mask)
+
+            if self.use_visual_conditioning_on_all_layers:
+                downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
+                audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds)
 
             audio_signal = layer(
                 x=audio_signal,
