@@ -1251,11 +1251,13 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         param_groups = []
         
         fddt_group = []
+        processed_param_names = set()
         for n, p in self.named_parameters():
             if 'fddt' in n:
+                processed_param_names.add(n)
                 fddt_group.append(p)
         param_groups.append({
-            "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 100)
+            "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)
         })
 
         if "optim_param_groups" in self.cfg:
@@ -1285,6 +1287,10 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             if len(other_params):
                 param_groups = [{"params": other_params}] + param_groups
         else:
-            param_groups = [{"params": list(self.parameters())}]
+            other_params = []
+            for n, p in self.named_parameters():
+                if n not in processed_param_names:
+                    other_params.append(p)
+            param_groups.append({"params": other_params})
 
         self._optimizer_param_groups = param_groups
