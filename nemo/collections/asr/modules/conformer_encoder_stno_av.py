@@ -64,27 +64,58 @@ __all__ = ['ConformerEncoderSTNOAV']
 
 
 class VisualProcessingModule(nn.Module):
-    def __init__(self, d_visual_embeds, d_model, visual_downsampling_factor):
+    def __init__(self, d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model='base', 
+                 conditioning_embed_aggr_method='avg', 
+                 num_conditioning_embeds=1):
+        """
+
+        """
         super().__init__()
         self.d_visual_embeds = d_visual_embeds
         self.d_model = d_model
         self.visual_downsampling_factor = visual_downsampling_factor
+        self.visual_preprocessing_model = visual_preprocessing_model
+        self.conditioning_embed_aggr_method = conditioning_embed_aggr_method
+        self.num_conditioning_embeds = num_conditioning_embeds
 
+        self.visual_ln = nn.LayerNorm(d_model)
+        self.output_linear = nn.Linear(d_model, d_model)
         self.visual_conv_downsampling = torch.nn.Conv1d(in_channels=d_visual_embeds, 
                                                         out_channels=d_model, 
                                                         kernel_size=5, 
                                                         stride=visual_downsampling_factor, 
                                                         padding=2)
-        self.visual_ln = nn.LayerNorm(d_model)
+
+        # Extra conditioning parameters
+        if self.visual_preprocessing_model == 'extra_conv':
+            self.extra_ln = nn.LayerNorm(d_model)
+            self.extra_conv = torch.nn.Conv1d(in_channels=d_visual_embeds, 
+                                              out_channels=d_model, 
+                                              kernel_size=9, 
+                                              stride=1, 
+                                              padding=4)
+
+        # Embedding aggregation parameters
+        if conditioning_embed_aggr_method == 'wavg':
+            self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds) / self.num_conditioning_embeds)
 
     def forward(self, visual_embeds, audio_signal):
         # visual_embeds: (B, T, C, D)
-        visual_embeds = visual_embeds.mean(dim=2)
+        if self.conditioning_embed_aggr_method == 'avg':
+            visual_embeds = visual_embeds.mean(dim=2)
+        elif self.conditioning_embed_aggr_method == 'wavg':
+            weights = torch.exp(self.log_weights)
+            visual_embeds = (visual_embeds * weights.view(1, 1, -1, 1)).sum(dim=2) / weights.sum()  # (B, T, D)
+        else:
+            raise ValueError(f'Unknown conditioning_embed_aggr_method: {self.conditioning_embed_aggr_method}')
+
+        # visual_embeds: (B, T, D)
         B_v, T_v, D_v = visual_embeds.shape
         downsampled_visual_embeds = self.visual_conv_downsampling(
             visual_embeds.permute(0, 2, 1).reshape(B_v, D_v, T_v)
         ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
 
+        # Sometimes, the audio shape can be off-by-one. Fix it by either getting rid of or adding one frame.
         shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1]
         if shape_diff == 1:
             downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,1,0,0))
@@ -95,14 +126,22 @@ class VisualProcessingModule(nn.Module):
         else:
             raise ValueError('Audio and visual embeddings have different time dimensions even after downsampling: {} vs {}.'.format(audio_signal.shape[1], downsampled_visual_embeds.shape[1]))
         
-        return self.visual_ln(downsampled_visual_embeds)
+        # We have matching shapes between acoustic and conditioning sequence, now we can add more parameters to further transform the visual embeddings.
+        if self.visual_preprocessing_model == 'extra_conv':
+            downsampled_visual_embeds = self.extra_ln(downsampled_visual_embeds)
+            downsampled_visual_embeds = self.extra_conv(
+                downsampled_visual_embeds.permute(0, 2, 1)
+            ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
+        
+        return self.visual_ln(self.output_linear(downsampled_visual_embeds))
 
 
 class VisualConditioningModule(nn.Module):
-    def __init__(self, d_model, visual_conditioning_method):
+    def __init__(self, d_model, visual_conditioning_method, modality_dropout_prob=0.0):
         super().__init__()
         self.d_model = d_model
         self.visual_conditioning_method = visual_conditioning_method
+        self.modality_dropout_prob = modality_dropout_prob
 
         if visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
@@ -113,14 +152,31 @@ class VisualConditioningModule(nn.Module):
                 dropout_rate=0.1,
             )
         elif visual_conditioning_method == 'rel_pos_cross_attn':
-            self.cross_attn = MultiHeadAttention(
+            self.cross_attn = RelPositionMultiHeadAttention(
                 n_feat=d_model,
                 n_head=8,
                 dropout_rate=0.1,
+                pos_bias_u=None,
+                pos_bias_v=None,
+                use_pytorch_sdpa=False,
+                use_pytorch_sdpa_backends=None,
             )
-            pass
+            self.pos_enc = RelPositionalEncoding(
+                d_model=d_model,
+                dropout_rate=0.1,
+                max_len=45000,
+                xscale=True,
+                dropout_rate_emb=0.1,
+            )
+
+            device = next(self.parameters()).device
+            dtype = next(self.parameters()).dtype
+            self.pos_enc.extend_pe(45000, device, dtype)
 
     def forward(self, audio_signal, visual_embeds, att_mask=None):
+        if random.random() < self.modality_dropout_prob and self.training:
+            audio_signal = 0 * audio_signal
+
         if self.visual_conditioning_method == 'add':
             conditioned_audio = audio_signal + visual_embeds
         elif self.visual_conditioning_method == 'film':
@@ -128,7 +184,8 @@ class VisualConditioningModule(nn.Module):
         elif self.visual_conditioning_method == 'cross_attn':
             conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
         elif self.visual_conditioning_method == 'rel_pos_cross_attn':
-            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
+            visual_embeds, pe = self.pos_enc(visual_embeds, cache_len=0)
+            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask, pos_emb=pe)
         else:
             raise ValueError(f'Unknown visual conditioning method: {self.visual_conditioning_method}')
         
@@ -415,6 +472,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         visual_conditioning_method: str = 'add', # add, film
         use_pre_pe_visual_conditioning: bool = True,
         use_visual_conditioning_on_all_layers: bool = False,
+        visual_preprocessing_model: str = 'base', # base - downsample conv + LN, extra_conv  + LN + additional conv + LN
+        conditioning_embed_aggr_method: str = 'avg',  # avg, wavg
+        num_conditioning_embeds: int = 1, # 1 if only one model layer is used, otherwise # of layers. E.g. AV Hubert produces 25.
+        modality_dropout_prob: float = 0.0,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -462,19 +523,23 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.visual_conditioning_method = visual_conditioning_method
         self.use_pre_pe_visual_conditioning = use_pre_pe_visual_conditioning
         self.use_visual_conditioning_on_all_layers = use_visual_conditioning_on_all_layers
-        
+        self.visual_preprocessing_model = visual_preprocessing_model
+        self.conditioning_embed_aggr_method = conditioning_embed_aggr_method
+        self.num_conditioning_embeds = num_conditioning_embeds
+        self.modality_dropout_prob = modality_dropout_prob
+
         if self.use_pre_pe_visual_conditioning:
-            self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
-            self.pre_pe_visual_conditioning = VisualConditioningModule(d_model, visual_conditioning_method)
+            self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
+            self.pre_pe_visual_conditioning = VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
 
 
         if self.use_visual_conditioning_on_all_layers:
             self.processing_modules = nn.ModuleList([
-                VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor)
+                VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
                 for _ in range(n_layers)
             ])
             self.conditioning_modules = nn.ModuleList([
-                VisualConditioningModule(d_model, visual_conditioning_method)
+                VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
                 for _ in range(n_layers)
             ])
 
