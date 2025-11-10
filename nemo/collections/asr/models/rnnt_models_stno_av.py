@@ -131,6 +131,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             self.joint.set_loss(self.loss)
             self.joint.set_wer(self.wer)
 
+        self.freeze_nonvision_parameters = self.cfg.get('freeze_nonvision_parameters', False)
+
         # Setup optimization normalization (if provided in config)
         self.setup_optim_normalization()
 
@@ -933,6 +935,13 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         super().on_train_epoch_start()
         torch.cuda.empty_cache()
         # self.meeteval_mt_wer.reset()
+
+        if self.freeze_nonvision_parameters:
+            for _, param in self.named_parameters():
+                param.requires_grad = False
+            
+            self.encoder.unfreeze_visual_parameters()
+        
     
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()

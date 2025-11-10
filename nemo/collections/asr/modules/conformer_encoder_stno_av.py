@@ -190,6 +190,52 @@ class VisualConditioningModule(nn.Module):
             raise ValueError(f'Unknown visual conditioning method: {self.visual_conditioning_method}')
         
         return conditioned_audio
+    
+
+class VisionAdapterEncoder(nn.Module):
+    def __init__(self, d_model, num_layers=8, num_heads=8, d_ff_ratio=2, dropout=0.1, dropout_pre_enc=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.pos_enc = RelPositionalEncoding(
+            d_model=d_model,
+            dropout_rate=dropout_pre_enc,
+            max_len=45000,
+            xscale=None,
+            dropout_rate_emb=0.0,
+        )
+        self.layers = nn.ModuleList([
+            ConformerLayer(
+                d_model=d_model,
+                d_ff=d_model * d_ff_ratio,
+                self_attention_model='rel_pos',
+                global_tokens=0,
+                global_tokens_spacing=1,
+                global_attn_separate=1,
+                n_heads=num_heads,
+                conv_kernel_size=31,
+                conv_norm_type='batch_norm',
+                conv_context_size=None,
+                dropout=dropout,
+                dropout_att=dropout,
+                pos_bias_u=None,
+                pos_bias_v=None,
+                att_context_size=[-1, -1],
+                use_bias=False,
+                use_pytorch_sdpa=False,
+                use_pytorch_sdpa_backends=None,
+            ) for _ in range(num_layers)
+        ])
+
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        self.pos_enc.extend_pe(45000, device, dtype)
+    
+    def forward(self, x, att_mask=None, pad_mask=None):
+        x, pos_emb = self.pos_enc(x, cache_len=0)
+        for layer in self.layers:
+            x = layer(x, att_mask=att_mask, pos_emb=pos_emb, pad_mask=pad_mask)
+        return x
+        
 
 
 class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
@@ -476,6 +522,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         conditioning_embed_aggr_method: str = 'avg',  # avg, wavg
         num_conditioning_embeds: int = 1, # 1 if only one model layer is used, otherwise # of layers. E.g. AV Hubert produces 25.
         modality_dropout_prob: float = 0.0,
+        use_visual_adapter_encoder: bool = False,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -527,6 +574,18 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.conditioning_embed_aggr_method = conditioning_embed_aggr_method
         self.num_conditioning_embeds = num_conditioning_embeds
         self.modality_dropout_prob = modality_dropout_prob
+        self.use_visual_adapter_encoder = use_visual_adapter_encoder
+
+        if self.use_visual_adapter_encoder:
+            self.visual_adapter_encoder = VisionAdapterEncoder(
+                d_model=d_model,
+                num_layers=4,
+                num_heads=n_heads,
+                d_ff_ratio=2,
+                dropout=dropout,
+                dropout_pre_enc=dropout_pre_encoder,
+            )
+            assert self.num_conditioning_embeds == 1, "When using visual adapter encoder, num_conditioning_embeds must be 1."
 
         if self.use_pre_pe_visual_conditioning:
             self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
@@ -542,6 +601,16 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                 VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
                 for _ in range(n_layers)
             ])
+
+    def unfreeze_visual_parameters(self):
+        for param in self.pre_pe_visual_processing.parameters():
+            param.requires_grad = True
+        for param in self.pre_pe_visual_conditioning.parameters():
+            param.requires_grad = True
+
+        if self.use_visual_adapter_encoder:
+            for param in self.visual_adapter_encoder.parameters():
+                param.requires_grad = True
 
     @typecheck()
     def forward(
@@ -675,6 +744,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             offset=offset,
             device=audio_signal.device,
         )
+
+        if self.use_visual_adapter_encoder:
+            vis_pad_mask, vis_att_mask = self._create_masks(att_context_size=[-1, -1], padding_length=visual_embed_lengths, max_audio_length=visual_embeds.size(1), offset=None, device=visual_embeds.device)
+            visual_embeds = self.visual_adapter_encoder(visual_embeds.squeeze(dim=2), att_mask=vis_att_mask, pad_mask=vis_pad_mask).unsqueeze(dim=2)
 
         if self.use_pre_pe_visual_conditioning:
             downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
