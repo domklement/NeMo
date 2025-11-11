@@ -142,6 +142,18 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         # Setup encoder adapters (from ASRAdapterModelMixin)
         self.setup_adapters()
 
+    def setup(self, stage: Optional[str] = None):
+        super().setup(stage=stage)
+
+        if stage == 'fit' and self.freeze_nonvision_parameters:
+            logging.info("Freezing non-visual parameters for optimizer setup.")
+            self.eval()
+            for _, param in self.named_parameters():
+                param.requires_grad = False
+            
+            self.encoder.unfreeze_visual_parameters()
+
+
     def setup_optim_normalization(self):
         """
         Helper method to setup normalization of certain parts of the model prior to the optimization step.
@@ -935,13 +947,6 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         super().on_train_epoch_start()
         torch.cuda.empty_cache()
         # self.meeteval_mt_wer.reset()
-
-        if self.freeze_nonvision_parameters:
-            self.eval()
-            for _, param in self.named_parameters():
-                param.requires_grad = False
-            
-            self.encoder.unfreeze_visual_parameters()
         
     
     def on_validation_epoch_start(self) -> None:
@@ -1167,6 +1172,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
     def on_after_backward(self):
         super().on_after_backward()
+
+        # for name, param in self.named_parameters():
+        #     if param.grad is None:
+        #         print(f"⚠️ No gradient: {name}")
+
         if self._optim_variational_noise_std > 0 and self.global_step >= self._optim_variational_noise_start:
             for param_name, param in self.decoder.named_parameters():
                 if param.grad is not None:
@@ -1251,17 +1261,6 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
     @wer.setter
     def wer(self, wer):
         self._wer = wer
-
-    def setup_optimizer(self, *args, **kwargs) -> 'torch.optim.Optimizer':
-        if self.freeze_nonvision_parameters:
-            logging.info("Freezing non-visual parameters for optimizer setup.")
-            self.eval()
-            for _, param in self.named_parameters():
-                param.requires_grad = False
-            
-            self.encoder.unfreeze_visual_parameters()
-
-        return super().setup_optimizer(*args, **kwargs)
 
     def setup_optimizer_param_groups(self):
         if not hasattr(self, "parameters"):
