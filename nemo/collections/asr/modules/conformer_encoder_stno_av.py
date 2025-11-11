@@ -603,12 +603,16 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             ])
 
     def unfreeze_visual_parameters(self):
+        self.pre_pe_visual_processing.train()
+        self.pre_pe_visual_conditioning.train()
+
         for param in self.pre_pe_visual_processing.parameters():
             param.requires_grad = True
         for param in self.pre_pe_visual_conditioning.parameters():
             param.requires_grad = True
 
         if self.use_visual_adapter_encoder:
+            self.visual_adapter_encoder.train()
             for param in self.visual_adapter_encoder.parameters():
                 param.requires_grad = True
 

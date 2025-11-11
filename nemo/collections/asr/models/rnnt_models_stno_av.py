@@ -937,6 +937,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         # self.meeteval_mt_wer.reset()
 
         if self.freeze_nonvision_parameters:
+            self.eval()
             for _, param in self.named_parameters():
                 param.requires_grad = False
             
@@ -1250,6 +1251,17 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
     @wer.setter
     def wer(self, wer):
         self._wer = wer
+
+    def setup_optimizer(self, *args, **kwargs) -> 'torch.optim.Optimizer':
+        if self.freeze_nonvision_parameters:
+            logging.info("Freezing non-visual parameters for optimizer setup.")
+            self.eval()
+            for _, param in self.named_parameters():
+                param.requires_grad = False
+            
+            self.encoder.unfreeze_visual_parameters()
+
+        return super().setup_optimizer(*args, **kwargs)
 
     def setup_optimizer_param_groups(self):
         if not hasattr(self, "parameters"):

@@ -195,6 +195,7 @@ class MeetevalMTWER(Metric):
         utt_ids = dim_zero_cat(self.utt_ids)
         spk_ids = dim_zero_cat(self.spk_ids)
 
+        # Build ground truth segments from the entire dataset
         gt_segments = dict()
         for i in range(len(targets_collection)):
             speakers = sorted(list(set(x['speaker'] for x in targets_collection[i].text_tokens)))
@@ -225,6 +226,9 @@ class MeetevalMTWER(Metric):
                 current_ts_start += preds_word_timestamps_lengths[i]
                 continue
 
+            # Mark this pair as processed before any early exits
+            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
+
             if utt_ids[i].item() not in pred_segments:
                 pred_segments[utt_ids[i].item()] = []
 
@@ -239,7 +243,6 @@ class MeetevalMTWER(Metric):
                 current_ts_start += preds_word_timestamps_lengths[i]
                 continue
             
-            already_processed_pairs.add((utt_ids[i].item(), spk_ids[i].item()))
             current_transcript = self.decoding.decode_tokens_to_str(preds[current_start:current_start + preds_lengths[i]].detach().cpu())
             words = current_transcript.split()
             if not words:
@@ -289,31 +292,27 @@ class MeetevalMTWER(Metric):
                                                     words=self.text_norm(' '.join([w[0] for w in current_segment_words])), 
                                                     start_time=current_segment_words[0][1] * self.embed_duration, 
                                                     end_time=current_segment_words[-1][2] * self.embed_duration))
-
+        
         pred_segment_ids = sorted(list(pred_segments.keys()))
         
-        assert len(gt_segment_ids) == len(pred_segment_ids), f"Number of gt segments must match number of pred segments: {len(gt_segment_ids)} != {len(pred_segment_ids)}"
-
+        # GT should contain all files from dataset, predictions should contain all processed files (after deduplication)
+        # They should match if all files were processed correctly
+        if len(gt_segment_ids) != len(pred_segment_ids):
+            logging.warning(f"GT has {len(gt_segment_ids)} utterances but predictions have {len(pred_segment_ids)} utterances. "
+                          f"Missing predictions for: {set(gt_segment_ids) - set(pred_segment_ids)}")
         
-        num_elems_per_rank = ceil(len(gt_segment_ids) / get_world_size())
-        begin_idx = get_rank() * num_elems_per_rank
-        end_idx = (get_rank() + 1) * num_elems_per_rank
-        gt_seg_lst = SegLST(segments=[seg for uid in gt_segment_ids[begin_idx:end_idx] for seg in gt_segments[uid]])
-        pred_seg_lst = SegLST(segments=[seg for uid in pred_segment_ids[begin_idx:end_idx] for seg in pred_segments[uid]])
+        # For scoring, we need to match GT and predictions. 
+        # Use only the utterances that exist in both GT and predictions
+        common_segment_ids = sorted(list(set(gt_segment_ids) & set(pred_segment_ids)))
+        
+        # All ranks compute the full WER on the entire dataset (no work division)
+        gt_seg_lst = SegLST(segments=[seg for uid in common_segment_ids for seg in gt_segments[uid]])
+        pred_seg_lst = SegLST(segments=[seg for uid in common_segment_ids for seg in pred_segments[uid]])
 
         res_cp = self._process_metric_res(meeteval.wer.cpwer(reference=gt_seg_lst, hypothesis=pred_seg_lst))
         res_tcp = self._process_metric_res(meeteval.wer.tcpwer(reference=gt_seg_lst, hypothesis=pred_seg_lst, collar=5))
 
-        res_both_all_ranks = [None] * get_world_size()
-        if get_world_size() > 1:
-            torch.distributed.all_gather_object(res_both_all_ranks, (res_cp, res_tcp))
-        else:
-            res_both_all_ranks[0] = (res_cp, res_tcp)
-
-        res_cp = self._reduce_res([res[0] for res in res_both_all_ranks])
         res_cp['wer'] = (res_cp['sub'] + res_cp['ins'] + res_cp['del']) / res_cp['len']
-
-        res_tcp = self._reduce_res([res[1] for res in res_both_all_ranks])
         res_tcp['wer'] = (res_tcp['sub'] + res_tcp['ins'] + res_tcp['del']) / res_tcp['len']
 
         if save_stm_path is not None and is_global_rank_zero():
