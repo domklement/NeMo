@@ -99,6 +99,7 @@ class MeetevalMTWER(Metric):
         utt_ids: torch.Tensor,
         spk_ids: torch.Tensor,
     ):
+        # print(spk_ids, utt_ids)
         with torch.no_grad():
             # Each decoded obj contains text and y_sequence - not collapsed seq.
             # To get collapsed seq tokens, the easiest hack is to tokenize the text back to ids.
@@ -301,13 +302,13 @@ class MeetevalMTWER(Metric):
             logging.warning(f"GT has {len(gt_segment_ids)} utterances but predictions have {len(pred_segment_ids)} utterances. "
                           f"Missing predictions for: {set(gt_segment_ids) - set(pred_segment_ids)}")
         
-        # For scoring, we need to match GT and predictions. 
-        # Use only the utterances that exist in both GT and predictions
-        common_segment_ids = sorted(list(set(gt_segment_ids) & set(pred_segment_ids)))
+        # # For scoring, we need to match GT and predictions. 
+        # # Use only the utterances that exist in both GT and predictions
+        # common_segment_ids = sorted(list(set(gt_segment_ids) & set(pred_segment_ids)))
         
         # All ranks compute the full WER on the entire dataset (no work division)
-        gt_seg_lst = SegLST(segments=[seg for uid in common_segment_ids for seg in gt_segments[uid]])
-        pred_seg_lst = SegLST(segments=[seg for uid in common_segment_ids for seg in pred_segments[uid]])
+        gt_seg_lst = SegLST(segments=[seg for uid in gt_segment_ids for seg in gt_segments[uid]])
+        pred_seg_lst = SegLST(segments=[seg for uid in pred_segment_ids for seg in pred_segments[uid]])
 
         res_cp = self._process_metric_res(meeteval.wer.cpwer(reference=gt_seg_lst, hypothesis=pred_seg_lst))
         res_tcp = self._process_metric_res(meeteval.wer.tcpwer(reference=gt_seg_lst, hypothesis=pred_seg_lst, collar=5))
