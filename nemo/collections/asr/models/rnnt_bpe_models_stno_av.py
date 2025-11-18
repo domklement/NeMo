@@ -14,10 +14,12 @@
 
 import copy
 import os
+import random
 from typing import Dict, List, Optional, Union
 
 import torch
 from lightning.pytorch import Trainer
+import numpy as np
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 
 from nemo.collections.asr.data import av_to_text_and_stno_dataset
@@ -32,6 +34,7 @@ from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTBPEDecoding, RNNTBPEDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
+from nemo.collections.asr.data.av_to_text_and_stno_dataset_lhotse import get_av_to_text_and_stno_lhotse_dataset
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
 
@@ -277,31 +280,32 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
             logging.info(f"Changed decoding strategy to \n{OmegaConf.to_yaml(self.cfg.decoding)}")
 
     def _setup_dataloader_from_config(self, config: Optional[Dict], val: bool = False):
+        """
+        This is not a proper use of Lhotse datasets. We're just using manifests within our own custom dataset class.
+        """
         if config.get("use_lhotse"):
-            return get_lhotse_dataloader_from_config(
+            dataset = get_av_to_text_and_stno_lhotse_dataset(
                 config,
-                # During transcription, the model is initially loaded on the CPU.
-                # To ensure the correct global_rank and world_size are set,
-                # these values must be passed from the configuration.
-                global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
-                world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
-                dataset=LhotseSpeechToTextBpeDataset(
-                    tokenizer=self.tokenizer,
-                    return_cuts=config.get("do_transcribe", False),
-                ),
                 tokenizer=self.tokenizer,
+                sample_rate=self.cfg.sample_rate,
+                audio_downsampling_factor=int(self.cfg.sample_rate * self.cfg.preprocessor.window_stride * self.cfg.encoder.subsampling_factor),
+                # local_rank=self.local_rank,
+                # global_rank=self.global_rank,
+                # world_size=self.world_size,
+                # preprocessor_cfg=self.cfg.get("preprocessor", None),
+                val=val,
             )
-
-        dataset = av_to_text_and_stno_dataset.get_audio_to_text_bpe_dataset_from_config(
-            config=config,
-            local_rank=self.local_rank,
-            global_rank=self.global_rank,
-            world_size=self.world_size,
-            tokenizer=self.tokenizer,
-            preprocessor_cfg=self.cfg.get("preprocessor", None),
-            audio_downsampling_factor=int(self.cfg.sample_rate * self.cfg.preprocessor.window_stride * self.cfg.encoder.subsampling_factor),
-            val=val,
-        )
+        else:
+            dataset = av_to_text_and_stno_dataset.get_audio_to_text_bpe_dataset_from_config(
+                config=config,
+                local_rank=self.local_rank,
+                global_rank=self.global_rank,
+                world_size=self.world_size,
+                tokenizer=self.tokenizer,
+                preprocessor_cfg=self.cfg.get("preprocessor", None),
+                audio_downsampling_factor=int(self.cfg.sample_rate * self.cfg.preprocessor.window_stride * self.cfg.encoder.subsampling_factor),
+                val=val,
+            )
 
         if dataset is None:
             return None
@@ -336,6 +340,14 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
             config['drop_last'] = False
             shuffle = False
 
+        def seed_worker(worker_id):
+            # this is the base seed for *this* worker, derived from the DataLoader's generator
+            worker_seed = torch.initial_seed() % 2**32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+            # If you want to also force torch here (usually not needed):
+            # torch.manual_seed(worker_seed)
+
         return torch.utils.data.DataLoader(
             dataset=dataset,
             batch_size=config['batch_size'],
@@ -346,6 +358,8 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
             shuffle=shuffle,
             num_workers=config.get('num_workers', 0),
             pin_memory=config.get('pin_memory', False),
+            worker_init_fn=seed_worker,
+            generator=torch.Generator().manual_seed(1234)
         )
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':

@@ -738,7 +738,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, *_ = batch
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
@@ -856,7 +856,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         return list(zip(sample_id, best_hyp_text))
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, *_ = batch
 
         # print('Signal shape', signal.shape)
 
@@ -991,7 +991,12 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             if not os.path.exists(save_stm_path):
                 os.makedirs(save_stm_path, exist_ok=True)
 
-            cp_res, tcp_res = self.meeteval_mt_wer.compute(self._validation_dl.dataset.manifest_processor.collection, save_stm_path=save_stm_path)
+            if self.cfg.train_ds.get('use_lhotse', False):
+                gt_segments = self._validation_dl.dataset.segments_collection
+            else:
+                gt_segments = self._validation_dl.dataset.manifest_processor.collection
+
+            cp_res, tcp_res = self.meeteval_mt_wer.compute(gt_segments, save_stm_path=save_stm_path)
             output_dict['log'].update({'val/cp_wer': cp_res['wer'], 'val/cp_ins': cp_res['ins'], 'val/cp_del': cp_res['del'], 'val/cp_sub': cp_res['sub'], 'val/cp_len': cp_res['len'],
                                     'val/tcp_wer': tcp_res['wer'], 'val/tcp_ins': tcp_res['ins'], 'val/tcp_del': tcp_res['del'], 'val/tcp_sub': tcp_res['sub'], 'val/tcp_len': tcp_res['len']})
             self.meeteval_mt_wer.reset()

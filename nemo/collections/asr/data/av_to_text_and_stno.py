@@ -579,7 +579,7 @@ class _AVTextDataset(Dataset):
         start_idx = int(sample.offset * self.VIDEO_FPS) # Assuming 25 fps
         end_idx = start_idx + int(sample.duration * self.VIDEO_FPS)
         visual_embeds = visual_embeds[start_idx:end_idx, :, :]
-        # print(sample.offset, sample.duration, start_idx, end_idx, visual_embeds.shape)
+        
         speakers_tokens = []
         downsampled_freq = 16000 / self.audio_downsampling_factor
         downsampled_fl_length = fl if fl % self.audio_downsampling_factor == 0 else fl + (self.audio_downsampling_factor - (fl % self.audio_downsampling_factor))
