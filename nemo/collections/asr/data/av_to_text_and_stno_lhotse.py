@@ -472,10 +472,10 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         This provides an access to the tokenized segments collection to fit the non-lhotse style of WER computation.
         """
         segment_list = []
-        for utt_id, spk, c in self.spk_cut_list:
+        for i, c in enumerate(self.cutset):
             segment_list.append(
                 SimpleNamespace(
-                    id=utt_id,
+                    id=i,
                     text_tokens= [
                         {
                             'speaker': s.speaker,
