@@ -620,9 +620,6 @@ class _AVTextDataset(Dataset):
             t = reduce(lambda a,b: a + b['text'], tt, [])
             tl = len(t)
 
-        # if sample.duration > self.max_training_rand_seg_duration:
-        #     print()
-
         if self.return_sample_id:
             output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), stno_mask, torch.tensor(stno_mask.shape[-1]).long(), sample.id, speakers_idx[rand_spk], visual_embeds, torch.tensor(visual_embeds.shape[0]), index
         else:

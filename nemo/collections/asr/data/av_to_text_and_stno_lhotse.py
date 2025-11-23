@@ -40,6 +40,7 @@ from nemo.utils import logging
 from nemo.utils.data_utils import DataStoreObject, datastore_object_get, is_datastore_cache_shared, is_datastore_path
 from nemo.utils.get_rank import is_global_rank_zero
 from lhotse import load_manifest, CutSet, MonoCut
+from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 
 __all__ = [
     'LhotseAVToBPEAndSTNODataset',
@@ -299,6 +300,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         visual_features_key: Optional[str] = 'av_hubert_lip_features',
         video_key: Optional[str] = 'per_spk_face_crop_videos',
     ):
+        print("VAL:", val)
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             self.bos_id = tokenizer.bos_id
         else:
@@ -335,12 +337,16 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
                 t = self._tokenizer.text_to_ids(*args)
                 return t
+        
+        self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
 
         self.cutset = load_manifest(manifest_filepath)
         self.tokenizer = TokenizerWrapper(tokenizer)
         self.sample_rate = sample_rate
         self.max_training_rand_seg_duration = max_training_rand_seg_duration
         self.return_sample_id = return_sample_id
+        self.trim = trim
+        self.channel_selector = channel_selector
         self.audio_downsampling_factor = audio_downsampling_factor
         self.val = val
         self.return_audio = return_audio
@@ -355,7 +361,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.spk_cut_list = []
 
         for i, c in enumerate(self.cutset):
-            spks = CutSet.from_cuts([c]).speakers
+            spks = sorted(CutSet.from_cuts([c]).speakers)
             for s in spks:
                 self.spk_cut_list.append((i, s, c))
 
@@ -379,8 +385,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             rand_start = 0.0
             rand_end = cut_duration
         else:
-            rand_start = random.uniform(0, cut_duration - self.max_training_rand_seg_duration)
-            rand_end = rand_start + self.max_training_rand_seg_duration
+            if self.max_training_rand_seg_duration is None or cut_duration <= self.max_training_rand_seg_duration:
+                rand_start = 0.0
+                rand_end = cut_duration
+            else:
+                rand_start = random.uniform(0, cut_duration - self.max_training_rand_seg_duration)
+                rand_end = rand_start + self.max_training_rand_seg_duration
 
         start_sample = int(rand_start * self.sample_rate)
         start_second = start_sample / self.sample_rate
@@ -399,10 +409,35 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         spk_to_id = dict([a[::-1] for a in enumerate(sorted(CutSet.from_cuts([cut]).speakers))])
         target_spk_id = spk_to_id[spk]
         spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
-        audio_dec = AudioDecoder(cut.recording.sources[0].source)
-        audio = audio_dec.get_samples_played_in_range(start_seconds=start_second, stop_seconds=end_second)
+
+        audio_data = self.featurizer.process(
+            cut.recording.sources[0].source,
+            offset=start_second,
+            duration=end_second - start_second,
+            trim=self.trim,
+            orig_sr=cut.recording.sampling_rate,
+            channel_selector=self.channel_selector,
+        )
+
+        # audio_dec = AudioDecoder(cut.recording.sources[0].source)
+        # audio = audio_dec.get_samples_played_in_range(start_seconds=start_second, stop_seconds=end_second)
+
+        # audio_seg = AudioSegment(
+        #     audio.data.numpy(),
+        #     audio.sample_rate,
+        #     trim=False,
+        #     trim_ref=np.max,
+        #     trim_top_db=60,
+        #     trim_frame_length=2048,
+        #     trim_hop_length=512,
+        #     orig_sr=None,
+        #     channel_selector=None,
+        #     normalize_db=None,
+        #     ref_channel=None,
+        # )
+        # audio_data = self.featurizer.process_segment(audio_seg)
         
-        audio_data = audio.data.mean(dim=0)
+        # audio_data = audio.data.mean(dim=0)
         audio_data_len = torch.tensor(audio_data.shape[0], dtype=torch.long)
         tokenized_transcript = torch.tensor(self.tokenizer(' '.join([sup.text for sup in selected_supervisions]))).long()
         tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
@@ -413,6 +448,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         spk_activity_mask = torch.zeros((len(spk_to_id), downsampled_fl_length))
         for s in cut.supervisions:
+            if not self.tokenizer(s.text):
+                continue
             if s.start < rand_start or s.end > rand_end:
                 continue
             sup_start = s.start - rand_start

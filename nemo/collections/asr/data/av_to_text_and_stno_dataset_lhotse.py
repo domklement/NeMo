@@ -50,5 +50,7 @@ def get_av_to_text_and_stno_lhotse_dataset(
         manifest_filepath=cfg.manifest_filepath,
         tokenizer=tokenizer,
         max_training_rand_seg_duration=cfg.get("max_training_rand_seg_duration", None),
+        channel_selector=cfg.get("channel_selector", None),
+        trim=cfg.get("trim", False),
         **kwargs,
     )
