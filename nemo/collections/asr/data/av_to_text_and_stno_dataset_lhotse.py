@@ -52,5 +52,12 @@ def get_av_to_text_and_stno_lhotse_dataset(
         max_training_rand_seg_duration=cfg.get("max_training_rand_seg_duration", None),
         channel_selector=cfg.get("channel_selector", None),
         trim=cfg.get("trim", False),
+        return_audio=cfg.get("return_audio", True),
+        return_stno=cfg.get("return_stno", True),
+        return_visual_features=cfg.get("return_visual_features", True),
+        return_video=cfg.get("return_video", False),
+        visual_features_key=cfg.get("visual_features_key", "av_hubert_lip_features"),
+        video_key=cfg.get("video_key", "per_spk_face_crop_videos"),
+        use_asd_for_stno=cfg.get("use_asd_for_stno", False),
         **kwargs,
     )

@@ -293,12 +293,14 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         audio_downsampling_factor: int = 1,
         max_training_rand_seg_duration: Optional[int] = None,
         val: bool = False,
+        # Default values are in the get function that passes args from config.
         return_audio: bool = True,
         return_stno: bool = True,
         return_visual_features: bool = True,
         return_video: bool = False,
         visual_features_key: Optional[str] = 'av_hubert_lip_features',
         video_key: Optional[str] = 'per_spk_face_crop_videos',
+        use_asd_for_stno: bool = False,
     ):
         print("VAL:", val)
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
@@ -355,6 +357,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.return_video = return_video
         self.visual_features_key = visual_features_key
         self.video_key = video_key
+        self.use_asd_for_stno = use_asd_for_stno
         
         self.VIDEO_FPS = 25
         
@@ -408,7 +411,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         spk_to_id = dict([a[::-1] for a in enumerate(sorted(CutSet.from_cuts([cut]).speakers))])
         target_spk_id = spk_to_id[spk]
-        spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
+        # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
         audio_data = self.featurizer.process(
             cut.recording.sources[0].source,
@@ -418,45 +421,63 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             orig_sr=cut.recording.sampling_rate,
             channel_selector=self.channel_selector,
         )
-
-        # audio_dec = AudioDecoder(cut.recording.sources[0].source)
-        # audio = audio_dec.get_samples_played_in_range(start_seconds=start_second, stop_seconds=end_second)
-
-        # audio_seg = AudioSegment(
-        #     audio.data.numpy(),
-        #     audio.sample_rate,
-        #     trim=False,
-        #     trim_ref=np.max,
-        #     trim_top_db=60,
-        #     trim_frame_length=2048,
-        #     trim_hop_length=512,
-        #     orig_sr=None,
-        #     channel_selector=None,
-        #     normalize_db=None,
-        #     ref_channel=None,
-        # )
-        # audio_data = self.featurizer.process_segment(audio_seg)
-        
-        # audio_data = audio.data.mean(dim=0)
         audio_data_len = torch.tensor(audio_data.shape[0], dtype=torch.long)
-        tokenized_transcript = torch.tensor(self.tokenizer(' '.join([sup.text for sup in selected_supervisions]))).long()
-        tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
-        
+
         downsampled_freq = self.sample_rate / self.audio_downsampling_factor
         downsampled_fl_length = audio_data_len if audio_data_len % self.audio_downsampling_factor == 0 else audio_data_len + (self.audio_downsampling_factor - (audio_data_len % self.audio_downsampling_factor))
         downsampled_fl_length = int(downsampled_fl_length / self.audio_downsampling_factor)
 
+        # From now on, rand_end is adjusted to match the padded signal better.
+        rand_end = rand_start + downsampled_fl_length / downsampled_freq
+        start_sample = int(rand_start * self.sample_rate)
+        start_second = start_sample / self.sample_rate
+        end_sample = int(rand_end * self.sample_rate)
+        end_second = end_sample / self.sample_rate
+        start_vid_idx = int(start_second * self.VIDEO_FPS) # Assuming 25 fps
+        end_vid_idx = int(end_second * self.VIDEO_FPS)
+        
+        tokenized_transcript = torch.tensor(self.tokenizer(' '.join([sup.text for sup in selected_supervisions]))).long()
+        tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
+
         spk_activity_mask = torch.zeros((len(spk_to_id), downsampled_fl_length))
-        for s in cut.supervisions:
-            if not self.tokenizer(s.text):
-                continue
-            if s.start < rand_start or s.end > rand_end:
-                continue
-            sup_start = s.start - rand_start
-            sup_end = s.end - rand_start
-            start_idx = int(sup_start * downsampled_freq)
-            end_idx = int(sup_end * downsampled_freq)
-            spk_activity_mask[spk_to_id[s.speaker], start_idx:end_idx] = 1.
+        if self.use_asd_for_stno:
+            spk_to_asd_logits = dict()
+            all_speakers = spk_to_id.keys()
+            max_len = 0
+            for speaker in all_speakers:
+                with open(cut.custom['per_spk_asd'][speaker], 'r') as f:
+                    spk_to_asd_logits[speaker] = json.load(f)
+                    if len(spk_to_asd_logits[speaker]) > max_len:
+                        max_len = len(spk_to_asd_logits[speaker])
+            
+            assert self.VIDEO_FPS % downsampled_freq == 0, f"Video FPS {self.VIDEO_FPS} is not divisible by downsampled frequency {downsampled_freq}"
+            video_downsampling_factor = int(self.VIDEO_FPS // downsampled_freq)
+            for speaker in all_speakers:
+                assert len(spk_to_asd_logits[speaker]) == max_len, f"ASD length mismatch for speaker {speaker} in cut {cut.id}"
+                # FPS - 25Hz, We need 12.5 -> avg downsample.
+                # We need to either shorten or pad the logits to be able to perform the downsampling well.
+                
+                # We need to pad and downsample the ASD logits.
+                spk_asd_logits = list(spk_to_asd_logits[speaker].values())[start_vid_idx:end_vid_idx]
+                if len(spk_asd_logits) < video_downsampling_factor*downsampled_fl_length:
+                    spk_asd_logits = spk_asd_logits + [0.0] * (video_downsampling_factor*downsampled_fl_length - len(spk_asd_logits))
+                elif len(spk_asd_logits) > video_downsampling_factor*downsampled_fl_length:
+                    spk_asd_logits = spk_asd_logits[:video_downsampling_factor*downsampled_fl_length]
+                spk_asd_logits = torch.tensor(spk_asd_logits, dtype=torch.float32).reshape(downsampled_fl_length, video_downsampling_factor).mean(dim=1)
+
+                assert len(spk_asd_logits) == downsampled_fl_length, f"ASD length after downsampling mismatch for speaker {speaker} in cut {cut.id}"
+                spk_activity_mask[spk_to_id[speaker], :] = (spk_asd_logits > 0).float()
+        else:
+            for s in cut.supervisions:
+                if not self.tokenizer(s.text):
+                    continue
+                if s.start < rand_start or s.end > rand_end:
+                    continue
+                sup_start = s.start - rand_start
+                sup_end = s.end - rand_start
+                start_idx = int(sup_start * downsampled_freq)
+                end_idx = int(sup_end * downsampled_freq)
+                spk_activity_mask[spk_to_id[s.speaker], start_idx:end_idx] = 1.
         
         stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[spk])
         stno_len = torch.tensor(stno_mask.shape[1], dtype=torch.long)
