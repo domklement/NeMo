@@ -301,6 +301,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         visual_features_key: Optional[str] = 'av_hubert_lip_features',
         video_key: Optional[str] = 'per_spk_face_crop_videos',
         use_asd_for_stno: bool = False,
+        replace_path_prefixes: Optional[List[str]] = None,
+        replace_path_replacements: Optional[List[str]] = None,
     ):
         print("VAL:", val)
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
@@ -358,6 +360,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.visual_features_key = visual_features_key
         self.video_key = video_key
         self.use_asd_for_stno = use_asd_for_stno
+        self.replace_path_prefixes = replace_path_prefixes
+        self.replace_path_replacements = replace_path_replacements
         
         self.VIDEO_FPS = 25
         
@@ -369,6 +373,14 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 self.spk_cut_list.append((i, s, c))
 
         # self.spk_cut_list = self.spk_cut_list[:10]
+
+    def _replace_path(self, path: str) -> str:
+        if self.replace_path_prefixes is not None and self.replace_path_replacements is not None:
+            for prefix, replacement in zip(self.replace_path_prefixes, self.replace_path_replacements):
+                if path.startswith(prefix):
+                    path = path.replace(prefix, replacement, 1)
+                    break
+        return path
             
     def __len__(self):
         return len(self.spk_cut_list)
@@ -413,8 +425,9 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         target_spk_id = spk_to_id[spk]
         # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
+        recording_source = self._replace_path(cut.recording.sources[0].source)
         audio_data = self.featurizer.process(
-            cut.recording.sources[0].source,
+            recording_source,
             offset=start_second,
             duration=end_second - start_second,
             trim=self.trim,
@@ -445,7 +458,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             all_speakers = spk_to_id.keys()
             max_len = 0
             for speaker in all_speakers:
-                with open(cut.custom['per_spk_asd'][speaker], 'r') as f:
+                with open(self._replace_path(cut.custom['per_spk_asd'][speaker]), 'r') as f:
                     spk_to_asd_logits[speaker] = json.load(f)
                     if len(spk_to_asd_logits[speaker]) > max_len:
                         max_len = len(spk_to_asd_logits[speaker])
@@ -490,7 +503,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             if spk not in per_spk_vis_feat_paths:
                 raise ValueError(f"Speaker {spk} not found in visual features paths.")
 
-            visual_embeds = torch.load(per_spk_vis_feat_paths[spk], map_location='cpu', mmap=True)
+            visual_embeds = torch.load(self._replace_path(per_spk_vis_feat_paths[spk]), map_location='cpu', mmap=True)
             if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
                 visual_embeds = visual_embeds.unsqueeze(1)
 
@@ -500,11 +513,11 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 visual_embeds = visual_embeds.unsqueeze(1)
         else:
             visual_embeds = torch.tensor([])
-
+    
         if self.return_video and self.video_key is not None:
             if spk not in cut.custom[self.video_key]:
                 raise ValueError(f"Speaker {spk} not found in video paths.")
-            vid_dec = VideoDecoder(cut.custom[self.video_key][spk])
+            vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]))
             video_frames = vid_dec[start_vid_idx:end_vid_idx]
         else:
             video_frames = torch.tensor([])

@@ -59,5 +59,7 @@ def get_av_to_text_and_stno_lhotse_dataset(
         visual_features_key=cfg.get("visual_features_key", "av_hubert_lip_features"),
         video_key=cfg.get("video_key", "per_spk_face_crop_videos"),
         use_asd_for_stno=cfg.get("use_asd_for_stno", False),
+        replace_path_prefixes=cfg.get("replace_path_prefixes", None),
+        replace_path_replacements=cfg.get("replace_path_replacements", None),
         **kwargs,
     )
