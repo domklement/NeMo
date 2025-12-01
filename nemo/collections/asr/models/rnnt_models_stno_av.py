@@ -31,6 +31,8 @@ from nemo.collections.asr.losses.rnnt import RNNTLoss, resolve_rnnt_default_loss
 from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.modules.rnnt import RNNTDecoderJoint
+from nemo.collections.asr.modules.avhubert import AVHubertAVSR, make_non_pad_mask
+from nemo.collections.asr.data.av_data_utils import AudioTransform, VideoTransform
 from nemo.collections.asr.parts.mixins import (
     ASRModuleMixin,
     ASRTranscriptionMixin,
@@ -62,11 +64,48 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if trainer is not None:
             self.world_size = trainer.world_size
 
+        self.audio_transform = AudioTransform(subset="test")
+        self.video_transform = VideoTransform(subset="test")
+
+        # VISUAL EMBEDDING EXTRACTION CONFIGS
+        self.extract_features_on_the_fly = cfg.get("extract_features_on_the_fly", False)
+        self.visual_encoder_type = cfg.get("visual_encoder_type", None)
+        self.visual_encoder_ckpt_path = cfg.get("visual_encoder_ckpt_path", None)
+        self.freeze_visual_encoder = cfg.get("freeze_visual_encoder", False)
+        if self.extract_features_on_the_fly and (self.visual_encoder_type is None or self.visual_encoder_ckpt_path is None):
+            raise ValueError(
+                "When `extract_features_on_the_fly` is set to True, "
+                "`visual_encoder_type` and `visual_encoder_ckpt_path` must be provided."
+            )
+
+        if self.extract_features_on_the_fly:
+            if hasattr(cfg.train_ds, 'return_visual_features'):
+                cfg.train_ds.return_visual_features = False
+            if hasattr(cfg.validation_ds, 'return_visual_features'):
+                cfg.validation_ds.return_visual_features = False
+            if hasattr(cfg.train_ds, 'return_video'):
+                cfg.train_ds.return_video = True
+            if hasattr(cfg.validation_ds, 'return_video'):
+                cfg.validation_ds.return_video = True
+
         super().__init__(cfg=cfg, trainer=trainer)
 
         # Initialize components
         self.preprocessor = EncDecRNNTModelSTNOAV.from_config_dict(self.cfg.preprocessor)
         self.encoder = EncDecRNNTModelSTNOAV.from_config_dict(self.cfg.encoder)
+
+        if self.extract_features_on_the_fly:
+            if self.visual_encoder_type == 'avhubert':
+                # This has to be here, otherwise the dataloader setup fails.
+                self.vis_feat_extractor = AVHubertAVSR.from_pretrained(self.visual_encoder_ckpt_path)
+                if self.freeze_visual_encoder:
+                    self.vis_feat_extractor.eval()
+                    for param in self.vis_feat_extractor.parameters():
+                        param.requires_grad = False
+                else:
+                    self.vis_feat_extractor.train()
+            else:
+                raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 
         # Update config values required by components dynamically
         with open_dict(self.cfg.decoder):
@@ -132,6 +171,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             self.joint.set_wer(self.wer)
 
         self.freeze_nonvision_parameters = self.cfg.get('freeze_nonvision_parameters', False)
+
+        # pretrained_model_path = '/home/jovyan/NeMo/examples/asr/av_ts_asr_transducer/avhubert/model-bin/avsr_cocktail_mcorec_finetune'
+        # self.vis_feat_extractor = AVHubertAVSR.from_pretrained(pretrained_model_path)
+        # self.audio_transform = AudioTransform(subset="test")
+        # self.video_transform = VideoTransform(subset="test")
 
         # Setup optimization normalization (if provided in config)
         self.setup_optim_normalization()
@@ -732,13 +776,135 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             visual_embed_lengths=visual_embed_lengths)
         return encoded, encoded_len
 
+    def avhubert_get_visual_feats(self, video_frames, video_lengths):
+        # avhubert_audio_feats = torch.stack([self.audio_transform(signal[i].cpu()) for i in range(len(signal))], 
+        #                                    dim=0).to(signal.device)
+        avhubert_video_frames = video_frames
+        attn_mask = make_non_pad_mask(video_lengths).to(video_frames.device)
+        av_feats = self.vis_feat_extractor.avsr.encoder(
+            input_features=None,
+            video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
+            attention_mask=attn_mask,
+        ).last_hidden_state.unsqueeze(2)
+        return av_feats
+    
+    def get_visual_feats(self, signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched: bool = True):
+        if self.visual_encoder_type != 'avhubert':
+            raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
+
+        # If not chunking, defer to single-call implementation
+        if inference_mode != 'chunk' or chunk_length is None:
+            return self.avhubert_get_visual_feats(signal, signal_len, video_frames, video_lengths)
+
+        # video_frames expected shape: (B, T, C, H, W)
+        # video_lengths expected shape: (B,)
+        B = video_frames.shape[0]
+        T = video_frames.shape[1]
+        fps = 25
+        chunk_frames = max(1, int(chunk_length * fps))
+
+        # number of chunks per sample
+        n_chunks = (T + chunk_frames - 1) // chunk_frames
+
+        device = video_frames.device
+        lengths = video_lengths.to(device)
+
+        if batched:
+            # Pad time dimension to multiple of chunk_frames so we can batch all chunks
+            pad_len = n_chunks * chunk_frames
+            if pad_len != T:
+                pad_amount = pad_len - T
+                pad_shape = (B, pad_amount, video_frames.shape[2], video_frames.shape[3], video_frames.shape[4])
+                pad_tensor = video_frames.new_zeros(pad_shape)
+                video_frames_padded = torch.cat([video_frames, pad_tensor], dim=1)
+            else:
+                video_frames_padded = video_frames
+
+            # reshape into chunks: (B, n_chunks, chunk_frames, C, H, W) -> (B*n_chunks, chunk_frames, C, H, W)
+            _, Tp, C, H, W = video_frames_padded.shape
+            video_chunks = video_frames_padded.view(B, n_chunks, chunk_frames, C, H, W)
+            video_chunks = video_chunks.reshape(B * n_chunks, chunk_frames, C, H, W)
+
+            # build per-chunk lengths so attention mask can be constructed
+            chunk_lengths = []
+            for i in range(B):
+                L = int(lengths[i].item())
+                for k in range(n_chunks):
+                    start = k * chunk_frames
+                    rem = max(0, L - start)
+                    chunk_lengths.append(min(rem, chunk_frames))
+            chunk_lengths = torch.tensor(chunk_lengths, dtype=torch.long, device=device)
+
+            # attention mask: make_non_pad_mask expects lengths -> returns (B*n_chunks, chunk_frames)
+            attn_mask = make_non_pad_mask(chunk_lengths).to(device)
+
+            # permute to (batch, C, T, H, W) as expected by AVHubert encoder
+            video_chunks_perm = video_chunks.permute(0, 2, 1, 3, 4)
+
+            # run encoder on chunk-batch and recombine
+            av_feats_chunks = self.vis_feat_extractor.avsr.encoder(
+                input_features=None, video=video_chunks_perm, attention_mask=attn_mask
+            ).last_hidden_state
+
+            # av_feats_chunks: (B*n_chunks, chunk_frames, D) -> reshape to (B, pad_len, D)
+            D = av_feats_chunks.shape[-1]
+            av_feats = av_feats_chunks.view(B, n_chunks * chunk_frames, D)
+
+            # crop to original T (remove last-chunk padding) and return (B, T, 1, D)
+            av_feats = av_feats[:, :T, :]
+            return av_feats.unsqueeze(2)
+        else:
+            # Process chunks one-by-one (batched across samples) to avoid global padding.
+            chunk_outputs = []
+            for k in range(n_chunks):
+                start = k * chunk_frames
+                end = min(start + chunk_frames, T)
+                cur_len = end - start
+
+                # slice: (B, cur_len, C, H, W)
+                chunk = video_frames[:, start:end, :, :, :]
+
+                # per-sample valid lengths for this chunk
+                # clip negative values to 0
+                chunk_lengths_k = (lengths - start).clamp(min=0, max=cur_len)
+
+                # attention mask: (B, cur_len)
+                attn_mask_k = make_non_pad_mask(chunk_lengths_k).to(device)
+
+                # permute to (B, C, T_chunk, H, W)
+                chunk_perm = chunk.permute(0, 2, 1, 3, 4)
+
+                # run encoder for this chunk-batch
+                out = self.vis_feat_extractor.avsr.encoder(
+                    input_features=None, video=chunk_perm, attention_mask=attn_mask_k
+                ).last_hidden_state  # (B, cur_len, D)
+
+                chunk_outputs.append(out)
+
+            # concatenate along time to (B, T, D)
+            av_feats = torch.cat(chunk_outputs, dim=1)
+
+            # crop to original T (in case) and return (B, T, 1, D)
+            av_feats = av_feats[:, :T, :]
+            
+            assert av_feats.shape[0] == video_frames.shape[0], f"Expected B={video_frames.shape[0]}, got {av_feats.shape[0]}"
+            assert av_feats.shape[1] == video_frames.shape[1], f"Expected T={video_frames.shape[1]}, got {av_feats.shape[1]}"
+
+            return av_feats.unsqueeze(2)
+
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
         # Reset access registry
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, *_ = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths = batch
+
+        if self.extract_features_on_the_fly:
+            av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            visual_embeds = av_feats
+            visual_embed_lengths = video_lengths
+
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
@@ -794,7 +960,6 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             #     _, scores, words = self.wer.compute()
             #     self.wer.reset()
             #     tensorboard_logs.update({'training_batch_wer': scores.float() / words})
-
         else:
             # If experimental fused Joint-Loss-WER is used
             if (sample_id + 1) % log_every_n_steps == 0:
@@ -856,7 +1021,32 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         return list(zip(sample_id, best_hyp_text))
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, *_ = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths = batch
+        assert len(signal) == 1
+
+        if self.extract_features_on_the_fly:
+            av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            visual_embeds = av_feats
+            visual_embed_lengths = video_lengths
+
+        # # We need to pad the signal to match the # of video frames. It gets automatically padded in the conformer encoder, 
+        # # but we have different sampling rate - 25FPS vs 12.5Hz (fastconformer).
+        # av_diff = video_frames.shape[1]*640 - signal.shape[1] # 640 = 16000/25 - upsampling ratio from video to audio.
+        # padded_signal = signal
+        # if av_diff > 0:
+        #     padded_signal = torch.nn.functional.pad(signal, (0, av_diff))
+        # elif av_diff < 0:
+        #     padded_signal = signal[:, :-av_diff]
+
+        # avhubert_audio_feats = torch.stack([self.audio_transform(padded_signal[i].cpu()) for i in range(len(signal))], 
+        #                                    dim=0).to(signal.device)
+        
+        # avhubert_video_frames = video_frames
+        # with torch.no_grad():
+        #     av_feats = self.vis_feat_extractor.avsr.encoder(
+        #         input_features=avhubert_audio_feats.permute(0, 2, 1),
+        #         video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
+        #     ).last_hidden_state.unsqueeze(2)
 
         # print('Signal shape', signal.shape)
 

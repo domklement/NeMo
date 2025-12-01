@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import braceexpand
+import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -299,10 +300,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         return_visual_features: bool = True,
         return_video: bool = False,
         visual_features_key: Optional[str] = 'av_hubert_lip_features',
-        video_key: Optional[str] = 'per_spk_face_crop_videos',
+        video_key: Optional[str] = 'per_spk_lip_crop_videos',
         use_asd_for_stno: bool = False,
         replace_path_prefixes: Optional[List[str]] = None,
         replace_path_replacements: Optional[List[str]] = None,
+        audio_transform: Optional[callable] = None,
+        video_transform: Optional[callable] = None,
     ):
         print("VAL:", val)
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
@@ -362,6 +365,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.use_asd_for_stno = use_asd_for_stno
         self.replace_path_prefixes = replace_path_prefixes
         self.replace_path_replacements = replace_path_replacements
+        self.audio_transform = audio_transform
+        self.video_transform = video_transform
         
         self.VIDEO_FPS = 25
         
@@ -405,6 +410,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 rand_end = cut_duration
             else:
                 rand_start = random.uniform(0, cut_duration - self.max_training_rand_seg_duration)
+                # rand_start = 0.0 # DEBUG
                 rand_end = rand_start + self.max_training_rand_seg_duration
 
         start_sample = int(rand_start * self.sample_rate)
@@ -517,8 +523,11 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         if self.return_video and self.video_key is not None:
             if spk not in cut.custom[self.video_key]:
                 raise ValueError(f"Speaker {spk} not found in video paths.")
-            vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]))
+            vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
             video_frames = vid_dec[start_vid_idx:end_vid_idx]
+            video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+            if self.video_transform is not None:
+                video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
         else:
             video_frames = torch.tensor([])
 
