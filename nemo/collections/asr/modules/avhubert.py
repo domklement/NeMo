@@ -1044,18 +1044,18 @@ class AVHubertModel(PreTrainedModel):
         else:
             features_audio = torch.zeros_like(features_video)
         
-        if self.modality == 'audio':
-            features_video = 0 * features_video
-        elif self.modality == 'video':
-            features_audio = 0 * features_audio
-        else:
-            if self.training:
-                modality_drop_prob, audio_drop_prob = np.random.random(), np.random.random()
-                if modality_drop_prob < self.modality_dropout:
-                    if audio_drop_prob < self.audio_dropout:
-                        features_audio = 0 * features_audio
-                    else:
-                        features_video = 0 * features_video
+        # if self.modality == 'audio':
+        #     features_video = 0 * features_video
+        # elif self.modality == 'video':
+        #     features_audio = 0 * features_audio
+        # else:
+        #     if self.training:
+        #         modality_drop_prob, audio_drop_prob = np.random.random(), np.random.random()
+        #         if modality_drop_prob < self.modality_dropout:
+        #             if audio_drop_prob < self.audio_dropout:
+        #                 features_audio = 0 * features_audio
+        #             else:
+        #                 features_video = 0 * features_video
         
         if self.modality_fuse == 'concat':
             features = torch.cat([features_audio, features_video], dim=1)

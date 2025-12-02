@@ -99,6 +99,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             if self.visual_encoder_type == 'avhubert':
                 # This has to be here, otherwise the dataloader setup fails.
                 self.vis_feat_extractor = AVHubertAVSR.from_pretrained(self.visual_encoder_ckpt_path)
+                self.vis_feat_extractor.avsr.encoder.mask_emb.requires_grad = False
+                self.vis_feat_extractor.avsr.encoder.label_embs_concat.requires_grad = False
+                for p in self.vis_feat_extractor.avsr.encoder.feature_extractor_audio.proj.parameters():
+                    p.requires_grad = False
+                    
                 if self.freeze_visual_encoder:
                     self.vis_feat_extractor.eval()
                     for param in self.vis_feat_extractor.parameters():

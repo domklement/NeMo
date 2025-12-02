@@ -556,7 +556,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
         else:
             video_frames = torch.tensor([])
-            zero_frame_idxes = torch.tensor([])
+            zero_frame_idxes = np.array([], dtype=np.int64)
 
         return (
             audio_data, 
