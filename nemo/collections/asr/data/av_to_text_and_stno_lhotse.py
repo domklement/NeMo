@@ -74,7 +74,7 @@ def _speech_collate_fn(batch, pad_id):
     # 8: visual_embeds, 9: visual_embeds_length,
     # 10: video_frames, 11: video_frames_length,
     # optional 12: sample_id
-    if len(packed_batch) == 13:
+    if len(packed_batch) == 15:
         audio_lengths = packed_batch[1]
         tokens_lengths = packed_batch[3]
         stno_mask_lengths = packed_batch[5]
@@ -82,8 +82,9 @@ def _speech_collate_fn(batch, pad_id):
         spk_ids = packed_batch[7]
         visual_embed_lengths = packed_batch[9]
         video_frame_lengths = packed_batch[11]
+        zero_frame_idxes_length = packed_batch[13]
         sample_ids = packed_batch[12]
-    elif len(packed_batch) == 12:
+    elif len(packed_batch) == 14:
         audio_lengths = packed_batch[1]
         tokens_lengths = packed_batch[3]
         stno_mask_lengths = packed_batch[5]
@@ -91,6 +92,7 @@ def _speech_collate_fn(batch, pad_id):
         spk_ids = packed_batch[7]
         visual_embed_lengths = packed_batch[9]
         video_frame_lengths = packed_batch[11]
+        zero_frame_idxes_length = packed_batch[13]
         sample_ids = None
     else:
         raise ValueError("Expects 12 or 13 tensors in the batch!")
@@ -111,14 +113,17 @@ def _speech_collate_fn(batch, pad_id):
     has_video = video_frame_lengths[0] is not None
     if has_video:
         max_video_frame_len = max(video_frame_lengths).item()
+    has_zero_frame_idxes = zero_frame_idxes_length[0] is not None
+    if has_zero_frame_idxes:
+        max_zero_frame_idxes_len = max(zero_frame_idxes_length).item()
 
-    audio_signal, tokens, stno_masks, visual_embeds, video_frames_list = [], [], [], [], []
+    audio_signal, tokens, stno_masks, visual_embeds, video_frames_list, zero_frame_idxes_list = [], [], [], [], [], []
     for b in batch:
         # unpack according to returned tuple length
-        if len(b) == 12:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len = b
+        if len(b) == 14:
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len = b
         else:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, _ = b
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len, _ = b
 
         if has_audio:
             sig_len = sig_len.item()
@@ -154,6 +159,13 @@ def _speech_collate_fn(batch, pad_id):
                 video_frames_i = torch.nn.functional.pad(video_frames_i, pad)
             video_frames_list.append(video_frames_i)
 
+        if has_zero_frame_idxes:
+            zero_frame_idxes_len = zero_frame_idxes_i_len.item()
+            if zero_frame_idxes_len < max_zero_frame_idxes_len:
+                pad = (0, max_zero_frame_idxes_len - zero_frame_idxes_len)
+                zero_frame_idxes_i = torch.nn.functional.pad(zero_frame_idxes_i, pad, value=-1)
+            zero_frame_idxes_list.append(zero_frame_idxes_i)
+
     if has_audio:
         audio_signal = torch.stack(audio_signal)
         audio_lengths = torch.stack(audio_lengths)
@@ -182,6 +194,12 @@ def _speech_collate_fn(batch, pad_id):
     else:
         video_frames, video_frame_lengths = None, None
 
+    if has_zero_frame_idxes:
+        zero_frame_idxes = torch.stack(zero_frame_idxes_list)
+        zero_frame_idxes_length = torch.stack(zero_frame_idxes_length)
+    else:
+        zero_frame_idxes, zero_frame_idxes_length = None, None
+
     utt_ids = torch.tensor(utt_ids, dtype=torch.int32)
     spk_ids = torch.tensor(spk_ids, dtype=torch.int32)
     
@@ -199,6 +217,8 @@ def _speech_collate_fn(batch, pad_id):
             visual_embed_lengths,
             video_frames,
             video_frame_lengths,
+            zero_frame_idxes,
+            zero_frame_idxes_length,
         )
     else:
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
@@ -215,6 +235,8 @@ def _speech_collate_fn(batch, pad_id):
             visual_embed_lengths,
             video_frames,
             video_frame_lengths,
+            zero_frame_idxes,
+            zero_frame_idxes_length,
             sample_ids,
         )
 
@@ -273,6 +295,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             'visual_embeds_length': NeuralType(tuple('B'), LengthsType()),
             'video_frames': NeuralType(('B', 'T', 'H', 'W', 'C'), AudioSignal()),
             'video_frames_length': NeuralType(tuple('B'), LengthsType()),
+            'zero_frame_idxes': NeuralType(('B','T'), LengthsType()),
+            'zero_frame_idxes_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 
@@ -526,10 +550,13 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
             video_frames = vid_dec[start_vid_idx:end_vid_idx]
             video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+            zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+
             if self.video_transform is not None:
                 video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
         else:
             video_frames = torch.tensor([])
+            zero_frame_idxes = torch.tensor([])
 
         return (
             audio_data, 
@@ -544,6 +571,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             torch.tensor(len(visual_embeds), dtype=torch.long),
             video_frames,
             torch.tensor(len(video_frames), dtype=torch.long),
+            torch.from_numpy(zero_frame_idxes).long(),
+            torch.tensor(len(zero_frame_idxes), dtype=torch.long)
         )
     
     @property

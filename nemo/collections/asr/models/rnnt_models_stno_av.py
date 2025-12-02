@@ -72,6 +72,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         self.visual_encoder_type = cfg.get("visual_encoder_type", None)
         self.visual_encoder_ckpt_path = cfg.get("visual_encoder_ckpt_path", None)
         self.freeze_visual_encoder = cfg.get("freeze_visual_encoder", False)
+        self.replace_zero_video_frames_with_zero_embeds = cfg.get("replace_zero_video_frames_with_zero_embeds", False)
         if self.extract_features_on_the_fly and (self.visual_encoder_type is None or self.visual_encoder_ckpt_path is None):
             raise ValueError(
                 "When `extract_features_on_the_fly` is set to True, "
@@ -898,12 +899,15 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths = batch
 
         if self.extract_features_on_the_fly:
             av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
+            if self.replace_zero_video_frames_with_zero_embeds:
+                for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
+                    visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
 
         # forward() only performs encoder forward
@@ -1021,13 +1025,16 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         return list(zip(sample_id, best_hyp_text))
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths = batch
+        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths = batch
         assert len(signal) == 1
 
         if self.extract_features_on_the_fly:
             av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
+            if self.replace_zero_video_frames_with_zero_embeds:
+                for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
+                    visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
         # # We need to pad the signal to match the # of video frames. It gets automatically padded in the conformer encoder, 
         # # but we have different sampling rate - 25FPS vs 12.5Hz (fastconformer).
@@ -1263,6 +1270,13 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
             # return everything else
             return output_dict
+
+    # def on_before_optimizer_step(self, optimizer):
+    #     super().on_after_backward(optimizer)
+
+        # for name, param in self.named_parameters():
+        #     if param.grad is None:
+        #         print(f"⚠️ No gradient: {name}")
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         logs = self.validation_pass(batch, batch_idx, dataloader_idx=dataloader_idx)
