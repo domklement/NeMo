@@ -134,6 +134,27 @@ class VisualProcessingModule(nn.Module):
             ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
         
         return self.visual_ln(self.output_linear(downsampled_visual_embeds))
+    
+
+class ConcatAdapter(nn.Module):
+    def __init__(self, d_model, bottleneck=128):
+        super().__init__()
+        self.norm_h = nn.LayerNorm(d_model)
+        self.norm_v = nn.LayerNorm(d_model)
+        self.down = nn.Linear(2 * d_model, bottleneck)
+        self.up   = nn.Linear(bottleneck, d_model)
+        self.act  = nn.GELU()
+        self.gate = nn.Parameter(torch.full((d_model,), -3.0))  # per-channel gate
+
+    def forward(self, h, v):
+        # h, v: (B, T, d_model), time-aligned
+        h_n = self.norm_h(h)
+        v_n = self.norm_v(v)
+        x = torch.cat([h_n, v_n], dim=-1)
+        z = self.act(self.down(x))
+        delta = self.up(z)
+        alpha = torch.sigmoid(self.gate).view(1, 1, -1)
+        return h + alpha * delta
 
 
 class VisualConditioningModule(nn.Module):
@@ -145,6 +166,8 @@ class VisualConditioningModule(nn.Module):
 
         if visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
+        elif visual_conditioning_method == 'concat_add_gate':
+            self.concat_adapter = ConcatAdapter(d_model)
         elif visual_conditioning_method == 'cross_attn':
             self.cross_attn = MultiHeadAttention(
                 n_feat=d_model,
@@ -179,6 +202,8 @@ class VisualConditioningModule(nn.Module):
 
         if self.visual_conditioning_method == 'add':
             conditioned_audio = audio_signal + visual_embeds
+        elif self.visual_conditioning_method == 'concat_add_gate':
+            conditioned_audio = self.concat_adapter(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'film':
             conditioned_audio = self.film_layer(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'cross_attn':
