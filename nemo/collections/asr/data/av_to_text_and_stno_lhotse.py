@@ -330,8 +330,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         replace_path_replacements: Optional[List[str]] = None,
         audio_transform: Optional[callable] = None,
         video_transform: Optional[callable] = None,
-    ):
+        randomly_mask_audio_signal: bool = False,
+        max_random_audio_mask_span_seconds: float = 0.0,
+        max_random_audio_mask_ratio: float = 0.3,
+    ): 
         print("VAL:", val)
+        
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             self.bos_id = tokenizer.bos_id
         else:
@@ -391,7 +395,13 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.replace_path_replacements = replace_path_replacements
         self.audio_transform = audio_transform
         self.video_transform = video_transform
-        
+        self.randomly_mask_audio_signal = randomly_mask_audio_signal
+        self.max_random_audio_mask_span_seconds = max_random_audio_mask_span_seconds
+        self.max_random_audio_mask_ratio = max_random_audio_mask_ratio
+
+        # Disable audio masking during validation/validation-like usage
+        if self.val:
+            self.randomly_mask_audio_signal = False
         self.VIDEO_FPS = 25
         
         self.spk_cut_list = []
@@ -402,6 +412,52 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 self.spk_cut_list.append((i, s, c))
 
         # self.spk_cut_list = self.spk_cut_list[:10]
+
+    def _get_random_mask_range(self, audio_len_samples: int):
+        """Return (start_idx, end_idx) for a random contiguous mask or None.
+
+        The returned mask length is sampled uniformly up to
+        `max_random_audio_mask_span_seconds` and capped at 30% of actual audio length.
+        """
+        if not self.randomly_mask_audio_signal or self.max_random_audio_mask_span_seconds <= 0.0:
+            return None
+        if audio_len_samples <= 0:
+            return None
+
+        audio_len_seconds = audio_len_samples / float(self.sample_rate) if self.sample_rate > 0 else 0.0
+        max_allowed_seconds = min(self.max_random_audio_mask_span_seconds, self.max_random_audio_mask_ratio * audio_len_seconds)
+        if max_allowed_seconds <= 0.0:
+            return None
+
+        mask_seconds = random.uniform(0.0, max_allowed_seconds)
+        mask_samples = int(mask_seconds * float(self.sample_rate))
+        if mask_samples <= 0:
+            return None
+
+        if mask_samples >= audio_len_samples:
+            mask_samples = max(0, audio_len_samples - 1)
+        if mask_samples <= 0:
+            return None
+
+        start_idx = random.randint(0, audio_len_samples - mask_samples) if audio_len_samples - mask_samples > 0 else 0
+        end_idx = start_idx + mask_samples
+        return (start_idx, end_idx)
+
+    def _apply_mask_to_audio(self, audio_data, mask_range):
+        """Apply zero mask to `audio_data` for the provided (start,end) range.
+
+        Returns audio_data (possibly converted to a tensor) with masked region zeroed.
+        """
+        if mask_range is None:
+            return audio_data
+        start_idx, end_idx = mask_range
+        try:
+            audio_data[start_idx:end_idx] = 0
+            return audio_data
+        except Exception:
+            ad = torch.as_tensor(audio_data)
+            ad[start_idx:end_idx] = 0
+            return ad
 
     def _replace_path(self, path: str) -> str:
         if self.replace_path_prefixes is not None and self.replace_path_replacements is not None:
@@ -465,6 +521,11 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             channel_selector=self.channel_selector,
         )
         audio_data_len = torch.tensor(audio_data.shape[0], dtype=torch.long)
+
+        # Optionally apply a random contiguous zero-mask to the audio signal (refactored)
+        mask_range = self._get_random_mask_range(int(audio_data.shape[0]))
+        if mask_range is not None:
+            audio_data = self._apply_mask_to_audio(audio_data, mask_range)
 
         downsampled_freq = self.sample_rate / self.audio_downsampling_factor
         downsampled_fl_length = audio_data_len if audio_data_len % self.audio_downsampling_factor == 0 else audio_data_len + (self.audio_downsampling_factor - (audio_data_len % self.audio_downsampling_factor))
