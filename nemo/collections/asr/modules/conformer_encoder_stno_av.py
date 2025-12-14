@@ -100,6 +100,10 @@ class VisualProcessingModule(nn.Module):
             self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds) / self.num_conditioning_embeds)
 
     def forward(self, visual_embeds, audio_signal):
+        is_multispeaker = len(visual_embeds.shape) == 5
+        if is_multispeaker:
+            B_orig, T_orig, S_orig, C, D = visual_embeds.shape
+            visual_embeds = visual_embeds.permute(0, 2, 1, 3, 4).reshape(B_orig*S_orig, T_orig, C, D)
         # visual_embeds: (B, T, C, D)
         if self.conditioning_embed_aggr_method == 'avg':
             visual_embeds = visual_embeds.mean(dim=2)
@@ -132,6 +136,9 @@ class VisualProcessingModule(nn.Module):
             downsampled_visual_embeds = self.extra_conv(
                 downsampled_visual_embeds.permute(0, 2, 1)
             ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
+
+        if is_multispeaker:
+            downsampled_visual_embeds = downsampled_visual_embeds.reshape(B_orig, S_orig, -1, self.d_model).permute(0, 2, 1, 3)
         
         return self.visual_ln(self.output_linear(downsampled_visual_embeds))
     
@@ -158,7 +165,7 @@ class ConcatAdapter(nn.Module):
 
 
 class VisualConditioningModule(nn.Module):
-    def __init__(self, d_model, visual_conditioning_method, modality_dropout_prob=0.0):
+    def __init__(self, d_model, visual_conditioning_method, modality_dropout_prob=0.0, **kwargs):
         super().__init__()
         self.d_model = d_model
         self.visual_conditioning_method = visual_conditioning_method
@@ -198,7 +205,7 @@ class VisualConditioningModule(nn.Module):
             dtype = next(self.parameters()).dtype
             self.pos_enc.extend_pe(45000, device, dtype)
 
-    def forward(self, audio_signal, visual_embeds, att_mask=None):
+    def forward(self, audio_signal, visual_embeds, att_mask=None, **kwargs):
         if random.random() < self.modality_dropout_prob and self.training:
             audio_signal = 0 * audio_signal
 
@@ -221,6 +228,41 @@ class VisualConditioningModule(nn.Module):
         
         return conditioned_audio
     
+class MultiSpeakerVisualConditioningModule(nn.Module):
+    def __init__(self, d_model, visual_conditioning_method, modality_dropout_prob=0.0, max_num_speakers=8, **kwargs):
+        super().__init__()
+        self.d_model = d_model
+        self.visual_conditioning_method = visual_conditioning_method
+        self.modality_dropout_prob = modality_dropout_prob
+        self.max_num_speakers = max_num_speakers
+
+        if visual_conditioning_method == 'add':
+            self.tgt_proj = nn.Linear(d_model, d_model)
+            self.nontgt_proj = nn.Linear(d_model, d_model)
+            self.out_linear = nn.Linear(self.max_num_speakers * d_model, d_model)
+        else:
+            raise ValueError(f'Unknown visual conditioning method for multi-speaker: {self.visual_conditioning_method}')
+
+    def forward(self, audio_signal, visual_embeds, num_speakers, att_mask=None):
+        """
+        visual_embeds: (B, T, S, D)
+        """
+
+        if self.visual_conditioning_method == 'add':
+            # Project target and non-target embeddings
+            tgt_embeds = self.tgt_proj(visual_embeds[:, :, :1, :])
+            nontgt_embeds = self.nontgt_proj(visual_embeds[:, :, 1:, :])
+            vis_embeds = torch.concat([tgt_embeds, nontgt_embeds], dim=2)
+            vis_embeds = torch.nn.functional.pad(vis_embeds, (0, 0, 0, (self.max_num_speakers - vis_embeds.shape[2])))
+            for i, n in enumerate(num_speakers):
+                vis_embeds[i, :, n:, :] = 0.0  # Zero out embeddings for non-present speakers
+            vis_embeds = self.out_linear(vis_embeds.reshape((*vis_embeds.shape[:2], -1)))  # (B, T, D)
+            conditioned_audio = audio_signal + vis_embeds
+        else:
+            raise ValueError(f'Unknown visual conditioning method for multi-speaker: {self.visual_conditioning_method}')
+        
+        return conditioned_audio
+
 
 class VisionAdapterEncoder(nn.Module):
     def __init__(self, d_model, num_layers=8, num_heads=8, d_ff_ratio=2, dropout=0.1, dropout_pre_enc=0.1):
@@ -440,8 +482,9 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                 "bypass_pre_encode": NeuralType(tuple(), BoolType(), optional=True),
                 "stno_mask": NeuralType(('B', 'S', 'T'), MaskType(), optional=True),
                 "stno_mask_length": NeuralType(tuple('B'), LengthsType(), optional=True),
-                "visual_embeds": NeuralType(('B', 'T', 'C', 'D'), SpectrogramType(), optional=True),
+                "visual_embeds": NeuralType(('B', 'T', 'S', 'C', 'D'), SpectrogramType(), optional=True),
                 "visual_embed_lengths": NeuralType(tuple('B'), LengthsType(), optional=True),
+                "num_speakers": NeuralType(tuple('B'), LengthsType(), optional=True),
             }
         )
 
@@ -458,8 +501,9 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                 "bypass_pre_encode": NeuralType(tuple(), BoolType(), optional=True),
                 "stno_mask": NeuralType(('B', 'S', 'T'), MaskType(), optional=True),
                 "stno_mask_length": NeuralType(tuple('B'), LengthsType(), optional=True),
-                "visual_embeds": NeuralType(('B', 'T', 'C', 'D'), SpectrogramType(), optional=True),
+                "visual_embeds": NeuralType(('B', 'T', 'S', 'C', 'D'), SpectrogramType(), optional=True),
                 "visual_embed_lengths": NeuralType(tuple('B'), LengthsType(), optional=True),
+                "num_speakers": NeuralType(tuple('B'), LengthsType(), optional=True),
             }
         )
 
@@ -554,6 +598,8 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         modality_dropout_prob: float = 0.0,
         use_visual_adapter_encoder: bool = False,
         share_visual_preprocessing: bool = False,
+        multi_speaker_visual_conditioning: bool = False,
+        max_num_speakers: int = 8,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -607,6 +653,8 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.modality_dropout_prob = modality_dropout_prob
         self.use_visual_adapter_encoder = use_visual_adapter_encoder
         self.share_visual_preprocessing = share_visual_preprocessing
+        self.multi_speaker_visual_conditioning = multi_speaker_visual_conditioning
+        self.max_num_speakers = max_num_speakers
 
         if self.use_visual_adapter_encoder:
             self.visual_adapter_encoder = VisionAdapterEncoder(
@@ -623,11 +671,13 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             # Single shared preprocessing module for all uses
             self.shared_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
 
+        self.VIS_CONDITIONING_MODULE_CLASS = MultiSpeakerVisualConditioningModule if self.multi_speaker_visual_conditioning else VisualConditioningModule
+
         if self.use_pre_pe_visual_conditioning:
             if not self.share_visual_preprocessing:
                 # Create separate preprocessing module if not sharing
                 self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
-            self.pre_pe_visual_conditioning = VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
+            self.pre_pe_visual_conditioning = self.VIS_CONDITIONING_MODULE_CLASS(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob, max_num_speakers=max_num_speakers)
 
 
         if self.use_visual_conditioning_on_all_layers:
@@ -638,7 +688,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                     for _ in range(n_layers)
                 ])
             self.conditioning_modules = nn.ModuleList([
-                VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
+                self.VIS_CONDITIONING_MODULE_CLASS(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob, max_num_speakers=max_num_speakers)
                 for _ in range(n_layers)
             ])
         else:
@@ -688,6 +738,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         stno_mask_length=None,
         visual_embeds=None,
         visual_embed_lengths=None,
+        num_speakers=None,
     ):
         """
         Forward function for the ConformerEncoderSTNO accepting an audio signal and its corresponding length.
@@ -728,6 +779,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             stno_mask_length=stno_mask_length,
             visual_embeds=visual_embeds,
             visual_embed_lengths=visual_embed_lengths,
+            num_speakers=num_speakers,
         )
 
     def forward_internal(
@@ -742,6 +794,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         stno_mask_length=None,
         visual_embeds=None,
         visual_embed_lengths=None,
+        num_speakers=None,
     ):
         """
         The `audio_signal` input supports two formats depending on the `bypass_pre_encode` boolean flag.
@@ -762,6 +815,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             length = audio_signal.new_full(
                 (audio_signal.size(0),), audio_signal.size(-1), dtype=torch.int64, device=audio_signal.device
             )
+
+        if not self.multi_speaker_visual_conditioning and len(visual_embeds.shape) == 5:
+            # Squeeze the speaker dimension if not using multi-speaker visual conditioning
+            visual_embeds = visual_embeds.squeeze(dim=2)  # (B, T, C, D)
 
         # select a random att_context_size with the distribution specified by att_context_probs during training
         # for non-validation cases like test, validation or inference, it uses the first mode in self.att_context_size
@@ -814,14 +871,20 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
 
         # Preprocess visual embeddings once if sharing preprocessing modules
         if self.share_visual_preprocessing:
+            # (B, T, S, D)
             downsampled_visual_embeds_shared = self.shared_visual_processing(visual_embeds, audio_signal)
+
+            if self.multi_speaker_visual_conditioning:
+                # Zero out embeddings for non-present speakers.
+                for i, n in enumerate(num_speakers):
+                    downsampled_visual_embeds_shared[i, :, n:, :] = 0.0
 
         if self.use_pre_pe_visual_conditioning:
             if self.share_visual_preprocessing:
                 downsampled_visual_embeds = downsampled_visual_embeds_shared
             else:
                 downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
-            audio_signal = self.pre_pe_visual_conditioning(audio_signal, downsampled_visual_embeds, att_mask)
+            audio_signal = self.pre_pe_visual_conditioning(audio_signal=audio_signal, visual_embeds=downsampled_visual_embeds, att_mask=att_mask, num_speakers=num_speakers)
 
         # audio_signal = audio_signal + downsampled_visual_embeds
         audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
@@ -867,11 +930,11 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             if self.use_visual_conditioning_on_all_layers:
                 if self.share_visual_preprocessing:
                     # Reuse the shared preprocessed visual embeddings
-                    audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds_shared, att_mask)
+                    audio_signal = self.conditioning_modules[lth](audio_signal=audio_signal, visual_embeds=downsampled_visual_embeds, att_mask=att_mask, num_speakers=num_speakers)
                 else:
                     # Use per-layer preprocessing
                     downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
-                    audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds, att_mask)
+                    audio_signal = self.conditioning_modules[lth](audio_signal=audio_signal, visual_embeds=downsampled_visual_embeds, att_mask=att_mask, num_speakers=num_speakers)
             else:
                 raise NotImplementedError("Currently, at least one of use_pre_pe_visual_conditioning or use_visual_conditioning_on_all_layers must be True.")
             

@@ -66,6 +66,7 @@ def get_av_to_text_and_stno_lhotse_dataset(
         max_random_audio_mask_ratio=cfg.get("max_random_audio_mask_ratio", 0.3),
         replace_path_prefixes=cfg.get("replace_path_prefixes", None),
         replace_path_replacements=cfg.get("replace_path_replacements", None),
+        return_all_spks=cfg.get("return_all_spks", False),
         audio_transform=audio_transform,
         video_transform=video_transform,
         **kwargs,

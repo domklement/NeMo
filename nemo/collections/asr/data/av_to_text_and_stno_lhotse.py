@@ -40,7 +40,8 @@ from nemo.core.neural_types import *
 from nemo.utils import logging
 from nemo.utils.data_utils import DataStoreObject, datastore_object_get, is_datastore_cache_shared, is_datastore_path
 from nemo.utils.get_rank import is_global_rank_zero
-from lhotse import load_manifest, CutSet, MonoCut
+from lhotse import load_manifest, CutSet, MonoCut, fastcopy
+from lhotse.cut import MixedCut
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 
 __all__ = [
@@ -73,8 +74,10 @@ def _speech_collate_fn(batch, pad_id):
     # 6: utt_id, 7: spk_id,
     # 8: visual_embeds, 9: visual_embeds_length,
     # 10: video_frames, 11: video_frames_length,
-    # optional 12: sample_id
-    if len(packed_batch) == 15:
+    # 12: zero_frame_idxes, 13: zero_frame_idxes_length,
+    # 14: num_speakers
+    # optional 15: sample_id
+    if len(packed_batch) == 16:
         audio_lengths = packed_batch[1]
         tokens_lengths = packed_batch[3]
         stno_mask_lengths = packed_batch[5]
@@ -83,8 +86,9 @@ def _speech_collate_fn(batch, pad_id):
         visual_embed_lengths = packed_batch[9]
         video_frame_lengths = packed_batch[11]
         zero_frame_idxes_length = packed_batch[13]
-        sample_ids = packed_batch[12]
-    elif len(packed_batch) == 14:
+        num_speakers = packed_batch[14]
+        sample_ids = packed_batch[15]
+    elif len(packed_batch) == 15:
         audio_lengths = packed_batch[1]
         tokens_lengths = packed_batch[3]
         stno_mask_lengths = packed_batch[5]
@@ -93,9 +97,10 @@ def _speech_collate_fn(batch, pad_id):
         visual_embed_lengths = packed_batch[9]
         video_frame_lengths = packed_batch[11]
         zero_frame_idxes_length = packed_batch[13]
+        num_speakers = packed_batch[14]
         sample_ids = None
     else:
-        raise ValueError("Expects 12 or 13 tensors in the batch!")
+        raise ValueError(f"Expects 15 or 16 tensors in the batch, got {len(packed_batch)}!")
 
     max_audio_len = 0
     has_audio = audio_lengths[0] is not None
@@ -110,6 +115,8 @@ def _speech_collate_fn(batch, pad_id):
     has_visual_embed = visual_embed_lengths[0] is not None
     if has_visual_embed:
         max_visual_embed_len = max(visual_embed_lengths).item()
+        # Also get max number of speakers for padding
+        max_num_speakers = max(num_speakers).item()
     has_video = video_frame_lengths[0] is not None
     if has_video:
         max_video_frame_len = max(video_frame_lengths).item()
@@ -120,10 +127,10 @@ def _speech_collate_fn(batch, pad_id):
     audio_signal, tokens, stno_masks, visual_embeds, video_frames_list, zero_frame_idxes_list = [], [], [], [], [], []
     for b in batch:
         # unpack according to returned tuple length
-        if len(b) == 14:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len = b
+        if len(b) == 15:
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len, num_speakers_i = b
         else:
-            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len, _ = b
+            sig, sig_len, tokens_i, tokens_i_len, stno_mask_i, stno_mask_i_len, utt_id, spk_id, visual_embed_i, visual_embed_i_len, video_frames_i, video_frames_i_len, zero_frame_idxes_i, zero_frame_idxes_i_len, num_speakers_i, _ = b
 
         if has_audio:
             sig_len = sig_len.item()
@@ -145,8 +152,15 @@ def _speech_collate_fn(batch, pad_id):
             stno_masks.append(stno_mask_i)
         if has_visual_embed:
             visual_embed_i_len = visual_embed_i_len.item()
+            # visual_embed_i shape: (T, S, N, C)
+            # Pad time dimension if needed (T_right)
             if visual_embed_i_len < max_visual_embed_len:
-                pad = (0, 0, 0, 0, 0, max_visual_embed_len - visual_embed_i_len)
+                pad = (0, 0, 0, 0, 0, 0, 0, max_visual_embed_len - visual_embed_i_len)
+                visual_embed_i = torch.nn.functional.pad(visual_embed_i, pad)
+            # Pad speaker dimension if needed (S_right)
+            current_num_speakers = visual_embed_i.shape[1] if visual_embed_i.numel() > 0 else 0
+            if current_num_speakers < max_num_speakers:
+                pad = (0, 0, 0, 0, 0, max_num_speakers - current_num_speakers, 0, 0)
                 visual_embed_i = torch.nn.functional.pad(visual_embed_i, pad)
             visual_embeds.append(visual_embed_i)
         
@@ -202,6 +216,7 @@ def _speech_collate_fn(batch, pad_id):
 
     utt_ids = torch.tensor(utt_ids, dtype=torch.int32)
     spk_ids = torch.tensor(spk_ids, dtype=torch.int32)
+    num_speakers = torch.stack(num_speakers)
     
     if sample_ids is None:
         return (
@@ -219,6 +234,7 @@ def _speech_collate_fn(batch, pad_id):
             video_frame_lengths,
             zero_frame_idxes,
             zero_frame_idxes_length,
+            num_speakers,
         )
     else:
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
@@ -237,6 +253,7 @@ def _speech_collate_fn(batch, pad_id):
             video_frame_lengths,
             zero_frame_idxes,
             zero_frame_idxes_length,
+            num_speakers,
             sample_ids,
         )
 
@@ -291,12 +308,13 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             'stno_mask_length': NeuralType(tuple('B'), LengthsType()),
             'utterance_id': NeuralType(tuple('B'), VoidType()),
             'speaker_id': NeuralType(tuple('B'), VoidType()),
-            'visual_embeds': NeuralType(('B', 'T', 'N', 'C'), AudioSignal()),
+            'visual_embeds': NeuralType(('B', 'T', 'S', 'N', 'C'), AudioSignal()),
             'visual_embeds_length': NeuralType(tuple('B'), LengthsType()),
             'video_frames': NeuralType(('B', 'T', 'H', 'W', 'C'), AudioSignal()),
             'video_frames_length': NeuralType(tuple('B'), LengthsType()),
             'zero_frame_idxes': NeuralType(('B','T'), LengthsType()),
             'zero_frame_idxes_length': NeuralType(tuple('B'), LengthsType()),
+            'num_speakers': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 
@@ -333,6 +351,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         randomly_mask_audio_signal: bool = False,
         max_random_audio_mask_span_seconds: float = 0.0,
         max_random_audio_mask_ratio: float = 0.3,
+        return_all_spks: bool = False,
     ): 
         print("VAL:", val)
         
@@ -398,6 +417,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.randomly_mask_audio_signal = randomly_mask_audio_signal
         self.max_random_audio_mask_span_seconds = max_random_audio_mask_span_seconds
         self.max_random_audio_mask_ratio = max_random_audio_mask_ratio
+        self.return_all_spks = return_all_spks
 
         # Disable audio masking during validation/validation-like usage
         if self.val:
@@ -466,17 +486,65 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     path = path.replace(prefix, replacement, 1)
                     break
         return path
+    
+    def _pad_video_frames_for_track(self, video_frames: np.ndarray, track, total_duration: float) -> np.ndarray:
+        """
+        Pad video frames before and after based on track offset and duration.
+        
+        Args:
+            video_frames: Video frames array with shape (T, H, W)
+            track: The track object containing offset information
+            total_duration: Total duration of the mixed cut
+            
+        Returns:
+            Padded video frames with shape (T_padded, H, W)
+        """
+        track_offset = track.offset
+        track_duration = track.cut.duration
+        
+        # Calculate number of frames to pad before and after
+        frames_before = int(track_offset * self.VIDEO_FPS)
+        frames_after = int((total_duration - track_offset - track_duration) * self.VIDEO_FPS)
+        
+        # Create zero padding frames with same height and width as video_frames
+        if len(video_frames) > 0:
+            h, w = video_frames.shape[1], video_frames.shape[2]
+            pad_before = np.zeros((frames_before, h, w), dtype=video_frames.dtype)
+            pad_after = np.zeros((frames_after, h, w), dtype=video_frames.dtype)
+            padded_frames = np.concatenate([pad_before, video_frames, pad_after], axis=0)
+        else:
+            # If video_frames is empty, create all zero frames
+            # Use a default frame size or raise an error
+            raise ValueError("Cannot pad empty video frames without knowing frame dimensions")
+        
+        return padded_frames
             
     def __len__(self):
         return len(self.spk_cut_list)
     
     def __getitem__(self, idx):
+        """
+        MixedCuts are used only for simulated data. 
+        """
         if idx < 0 or idx >= len(self.spk_cut_list):
             raise IndexError("Index out of range")
 
         utt_id, spk, cut = self.spk_cut_list[idx]
-        if abs(cut.recording.has_video and cut.recording.sources[0].video.fps - self.VIDEO_FPS) > 1e-2:
-            raise ValueError(f"Cut video fps {cut.recording.sources[0].video.fps} does not match dataset fps {self.VIDEO_FPS}")
+        cut = fastcopy(cut)
+
+        if isinstance(cut, MonoCut):
+            if cut.recording.has_video and abs(cut.recording.sources[0].video.fps - self.VIDEO_FPS) > 1e-2:
+                raise ValueError(f"Cut video fps {cut.recording.sources[0].video.fps} does not match dataset fps {self.VIDEO_FPS}")
+        elif isinstance(cut, MixedCut):
+            for t in cut.tracks:
+                if t.cut.has_video and abs(t.cut.video.fps - self.VIDEO_FPS) > 1e-2:
+                    raise ValueError(f"Cut video fps {t.cut.video.fps} does not match dataset fps {self.VIDEO_FPS}")
+            
+            # We need to build the per_spk video dict.
+            per_spk_videos = dict()
+            for t in cut.tracks:
+                if t.cut.has_video:
+                    per_spk_videos[t.cut.supervisions[0].speaker] = t.cut.recording.sources[0].source
 
         cut_duration = cut.duration
         spk_specific_supervisions = list(filter(lambda s: s.speaker == spk, cut.supervisions ))
@@ -511,18 +579,28 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         end_vid_idx = int(end_second * self.VIDEO_FPS)
 
         spk_to_id = dict([a[::-1] for a in enumerate(sorted(CutSet.from_cuts([cut]).speakers))])
+        all_speakers = spk_to_id.keys()
         target_spk_id = spk_to_id[spk]
         # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
-        recording_source = self._replace_path(cut.recording.sources[0].source)
-        audio_data = self.featurizer.process(
-            recording_source,
-            offset=start_second,
-            duration=end_second - start_second,
-            trim=self.trim,
-            orig_sr=cut.recording.sampling_rate,
-            channel_selector=self.channel_selector,
-        )
+        if isinstance(cut, MonoCut):
+            recording_source = self._replace_path(cut.recording.sources[0].source)
+            audio_data = self.featurizer.process(
+                recording_source,
+                offset=start_second,
+                duration=end_second - start_second,
+                trim=self.trim,
+                orig_sr=cut.recording.sampling_rate,
+                channel_selector=self.channel_selector,
+            )
+        elif isinstance(cut, MixedCut):
+            for t in cut.tracks:
+                t.cut.recording.sources[0].source = self._replace_path(t.cut.recording.sources[0].source)
+            
+            audio_data = cut.load_audio()
+            assert audio_data.shape[0] == 1, "Only single channel audio is supported in MixedCut for now."
+            audio_data = audio_data[0, start_sample:end_sample]
+
         audio_data_len = torch.tensor(audio_data.shape[0], dtype=torch.long)
 
         # Optionally apply a random contiguous zero-mask to the audio signal (refactored)
@@ -546,10 +624,10 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         tokenized_transcript = torch.tensor(self.tokenizer(' '.join([sup.text for sup in selected_supervisions]))).long()
         tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
 
+        # STNO MASK CREATION
         spk_activity_mask = torch.zeros((len(spk_to_id), downsampled_fl_length))
         if self.use_asd_for_stno:
             spk_to_asd_logits = dict()
-            all_speakers = spk_to_id.keys()
             max_len = 0
             for speaker in all_speakers:
                 with open(self._replace_path(cut.custom['per_spk_asd'][speaker]), 'r') as f:
@@ -589,39 +667,62 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[spk])
         stno_len = torch.tensor(stno_mask.shape[1], dtype=torch.long)
 
+        # VISUAL FEATURES LOADING
         if self.return_visual_features and self.visual_features_key is not None:
-            if self.visual_features_key not in cut.custom:
-                raise ValueError(f"Visual features key {self.visual_features_key} not found in cut custom.")
+            assert not isinstance(cut, MixedCut), "MixedCut visual features loading not implemented yet."
             
-            per_spk_vis_feat_paths = cut.custom[self.visual_features_key]
-            if spk not in per_spk_vis_feat_paths:
-                raise ValueError(f"Speaker {spk} not found in visual features paths.")
-
-            visual_embeds = torch.load(self._replace_path(per_spk_vis_feat_paths[spk]), map_location='cpu', mmap=True)
-            if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
-                visual_embeds = visual_embeds.unsqueeze(1)
-
-            visual_embeds = visual_embeds[start_vid_idx:end_vid_idx, ...]
-
-            if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
-                visual_embeds = visual_embeds.unsqueeze(1)
+            if self.return_all_spks:
+                # Load visual features for all speakers and stack them
+                all_spk_visual_embeds = [self._get_spk_visual_feats(cut, spk, start_vid_idx, end_vid_idx)]
+                for speaker in sorted(all_speakers):
+                    if speaker == spk:
+                        continue
+                    spk_visual_embeds = self._get_spk_visual_feats(cut, speaker, start_vid_idx, end_vid_idx)
+                    all_spk_visual_embeds.append(spk_visual_embeds)
+                # Each spk tensor is (T, N, C). Stack along speaker dim=1 to get (T, S, N, C)
+                visual_embeds = torch.stack(all_spk_visual_embeds, dim=1)
+            else:
+                # Load only target speaker and add speaker dimension of size 1 at dim=1
+                visual_embeds = self._get_spk_visual_feats(cut, spk, start_vid_idx, end_vid_idx)
+                visual_embeds = visual_embeds.unsqueeze(1)  # (T, 1, N, C)
         else:
             visual_embeds = torch.tensor([])
     
+        # VIDEO FRAMES LOADING
         if self.return_video and self.video_key is not None:
-            if spk not in cut.custom[self.video_key]:
-                raise ValueError(f"Speaker {spk} not found in video paths.")
-            vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
-            video_frames = vid_dec[start_vid_idx:end_vid_idx]
-            video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
-            zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+            per_spk_videos = self._build_per_spk_vid_paths(cut)
+            if isinstance(cut, MixedCut):
+                if spk not in per_spk_videos:
+                    raise ValueError(f"Speaker {spk} not found in video paths.")
+                
+                # Load all video frames for the track
+                per_spk_tracks = dict([(t.cut.supervisions[0].speaker, t) for t in cut.tracks])
+                track = per_spk_tracks[spk]
+                
+                vid_dec = VideoDecoder(self._replace_path(per_spk_videos[spk]), dimension_order="NHWC")
+                video_frames = vid_dec[:]  # Load all frames without indexing
+                video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+                
+                # Pad video frames based on track offset and total cut duration
+                video_frames = self._pad_video_frames_for_track(video_frames, track, cut_duration)
+                
+                # Now extract the relevant segment from the padded video
+                video_frames = video_frames[start_vid_idx:end_vid_idx]
+                zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+            else:
+                if spk not in cut.custom[self.video_key]:
+                    raise ValueError(f"Speaker {spk} not found in video paths.")
+                vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
+                video_frames = vid_dec[start_vid_idx:end_vid_idx]
+                video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+                zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
 
             if self.video_transform is not None:
                 video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
         else:
             video_frames = torch.tensor([])
             zero_frame_idxes = np.array([], dtype=np.int64)
-
+        
         return (
             audio_data, 
             audio_data_len, 
@@ -636,8 +737,41 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             video_frames,
             torch.tensor(len(video_frames), dtype=torch.long),
             torch.from_numpy(zero_frame_idxes).long(),
-            torch.tensor(len(zero_frame_idxes), dtype=torch.long)
+            torch.tensor(len(zero_frame_idxes), dtype=torch.long),
+            torch.tensor(len(all_speakers), dtype=torch.long) if self.return_all_spks else torch.tensor(1, dtype=torch.long),
         )
+    
+    def _build_per_spk_vid_paths(self, cut):
+        if isinstance(cut, MixedCut):
+            per_spk_videos = dict()
+            for t in cut.tracks:
+                t_cut = t.cut
+                if self.video_key in t_cut.custom:
+                    per_spk_videos.update(t_cut.custom[self.video_key])
+                else:
+                    per_spk_videos[t_cut.supervisions[0].speaker] = t_cut.recording.sources[0].source
+        else:
+            per_spk_videos = cut.custom.get(self.video_key, dict())
+
+        return per_spk_videos
+    
+    def _get_spk_visual_feats(self, cut, spk, start_vid_idx, end_vid_idx):
+        if self.visual_features_key not in cut.custom:
+                raise ValueError(f"Visual features key {self.visual_features_key} not found in cut custom.")
+            
+        per_spk_vis_feat_paths = cut.custom[self.visual_features_key]
+        if spk not in per_spk_vis_feat_paths:
+            raise ValueError(f"Speaker {spk} not found in visual features paths.")
+
+        visual_embeds = torch.load(self._replace_path(per_spk_vis_feat_paths[spk]), map_location='cpu', mmap=True)
+        visual_embeds = visual_embeds[start_vid_idx:end_vid_idx, ...]
+
+        if len(visual_embeds.shape) == 2: # Shape: (time, layers, feature_dim)
+            visual_embeds = visual_embeds.unsqueeze(1)
+
+        
+        return visual_embeds
+    
     
     @property
     def segments_collection(self):

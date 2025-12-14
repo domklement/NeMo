@@ -712,8 +712,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             "processed_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
             "stno_mask": NeuralType(('B', 'S', 'T'), MaskType(), optional=True),
             "stno_mask_length": NeuralType(tuple('B'), LengthsType(), optional=True),
-            "visual_embeds": NeuralType(('B', 'T', 'C', 'D'), AcousticEncodedRepresentation(), optional=True),
+            "visual_embeds": NeuralType(('B', 'T', 'S', 'C', 'D'), AcousticEncodedRepresentation(), optional=True),
             "visual_embed_lengths": NeuralType(tuple('B'), LengthsType(), optional=True),
+            "num_speakers": NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 
     @property
@@ -725,7 +726,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
     @typecheck()
     def forward(
-        self, input_signal=None, input_signal_length=None, processed_signal=None, processed_signal_length=None, stno_mask=None, stno_mask_length=None, visual_embeds=None, visual_embed_lengths=None
+        self, input_signal=None, input_signal_length=None, processed_signal=None, processed_signal_length=None, stno_mask=None, stno_mask_length=None, visual_embeds=None, visual_embed_lengths=None, num_speakers=None
     ):
         """
         Forward pass of the model. Note that for RNNT Models, the forward pass of the model is a 3 step process,
@@ -779,7 +780,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             stno_mask=stno_mask, 
             stno_mask_length=stno_mask_length, 
             visual_embeds=visual_embeds, 
-            visual_embed_lengths=visual_embed_lengths)
+            visual_embed_lengths=visual_embed_lengths,
+            num_speakers=num_speakers,
+        )
         return encoded, encoded_len
 
     def avhubert_get_visual_feats(self, video_frames, video_lengths):
@@ -904,7 +907,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths = batch
+        if len(batch) == 16:
+            signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths, num_speakers, sample_id = batch
+        else:
+            signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths, num_speakers = batch
+            sample_id = None
 
         if self.extract_features_on_the_fly:
             av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
@@ -917,9 +924,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths)
+            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths)
+            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         
         del signal
         del signal_len
@@ -927,6 +934,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         del stno_mask_len
         del visual_embeds
         del visual_embed_lengths
+        del num_speakers
 
         # During training, loss must be computed, so decoder forward is necessary
         decoder, target_length, states = self.decoder(targets=transcript, target_length=transcript_len)
@@ -1030,7 +1038,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         return list(zip(sample_id, best_hyp_text))
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths = batch
+        if len(batch) == 16:
+            signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths, num_speakers, sample_id = batch
+        else:
+            signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths, num_speakers = batch
+            sample_id = None
         assert len(signal) == 1
 
         if self.extract_features_on_the_fly:
@@ -1064,13 +1076,14 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths)
+            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths)
+            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         del signal
         del signal_len
         del visual_embeds
         del visual_embed_lengths
+        del num_speakers
 
         tensorboard_logs = {}
 
