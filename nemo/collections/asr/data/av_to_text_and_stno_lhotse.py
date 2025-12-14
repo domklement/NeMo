@@ -493,19 +493,22 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 # rand_start = 0.0 # DEBUG
                 rand_end = rand_start + self.max_training_rand_seg_duration
 
-        start_sample = int(rand_start * self.sample_rate)
-        start_second = start_sample / self.sample_rate
-        end_sample = int(rand_end * self.sample_rate)
-        end_second = end_sample / self.sample_rate
-        start_vid_idx = int(start_second * self.VIDEO_FPS) # Assuming 25 fps
-        end_vid_idx = int(end_second * self.VIDEO_FPS)
-
         selected_supervisions = []
         for sup in spk_specific_supervisions:
             sup_start = sup.start
             sup_end = sup.end
             if sup_start >= rand_start and sup_end <= rand_end:
                 selected_supervisions.append(sup)
+
+        # We need to adjust the rand end according to the last spoken supervision.
+        rand_end = max(sup.end for sup in selected_supervisions) + 0.3 if selected_supervisions else rand_end
+
+        start_sample = int(rand_start * self.sample_rate)
+        start_second = start_sample / self.sample_rate
+        end_sample = int(rand_end * self.sample_rate)
+        end_second = end_sample / self.sample_rate
+        start_vid_idx = int(start_second * self.VIDEO_FPS) # Assuming 25 fps
+        end_vid_idx = int(end_second * self.VIDEO_FPS)
 
         spk_to_id = dict([a[::-1] for a in enumerate(sorted(CutSet.from_cuts([cut]).speakers))])
         target_spk_id = spk_to_id[spk]

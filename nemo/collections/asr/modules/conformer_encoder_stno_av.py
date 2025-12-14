@@ -164,7 +164,9 @@ class VisualConditioningModule(nn.Module):
         self.visual_conditioning_method = visual_conditioning_method
         self.modality_dropout_prob = modality_dropout_prob
 
-        if visual_conditioning_method == 'film':
+        if visual_conditioning_method == 'add_gate':
+            self.gate = nn.Parameter(torch.full((d_model,), -3.0))  # per-channel gate
+        elif visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
         elif visual_conditioning_method == 'concat_add_gate':
             self.concat_adapter = ConcatAdapter(d_model)
@@ -202,6 +204,9 @@ class VisualConditioningModule(nn.Module):
 
         if self.visual_conditioning_method == 'add':
             conditioned_audio = audio_signal + visual_embeds
+        elif self.visual_conditioning_method == 'add_gate':
+            alpha = torch.sigmoid(self.gate).view(1, 1, -1)
+            conditioned_audio = audio_signal + alpha * visual_embeds
         elif self.visual_conditioning_method == 'concat_add_gate':
             conditioned_audio = self.concat_adapter(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'film':
@@ -548,6 +553,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         num_conditioning_embeds: int = 1, # 1 if only one model layer is used, otherwise # of layers. E.g. AV Hubert produces 25.
         modality_dropout_prob: float = 0.0,
         use_visual_adapter_encoder: bool = False,
+        share_visual_preprocessing: bool = False,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -600,6 +606,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.num_conditioning_embeds = num_conditioning_embeds
         self.modality_dropout_prob = modality_dropout_prob
         self.use_visual_adapter_encoder = use_visual_adapter_encoder
+        self.share_visual_preprocessing = share_visual_preprocessing
 
         if self.use_visual_adapter_encoder:
             self.visual_adapter_encoder = VisionAdapterEncoder(
@@ -612,36 +619,56 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             )
             assert self.num_conditioning_embeds == 1, "When using visual adapter encoder, num_conditioning_embeds must be 1."
 
+        if self.share_visual_preprocessing:
+            # Single shared preprocessing module for all uses
+            self.shared_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
+
         if self.use_pre_pe_visual_conditioning:
-            self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
+            if not self.share_visual_preprocessing:
+                # Create separate preprocessing module if not sharing
+                self.pre_pe_visual_processing = VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
             self.pre_pe_visual_conditioning = VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
 
 
         if self.use_visual_conditioning_on_all_layers:
-            self.processing_modules = nn.ModuleList([
-                VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
-                for _ in range(n_layers)
-            ])
+            if not self.share_visual_preprocessing:
+                # Per-layer preprocessing modules (only if not sharing)
+                self.processing_modules = nn.ModuleList([
+                    VisualProcessingModule(d_visual_embeds, d_model, visual_downsampling_factor, visual_preprocessing_model, conditioning_embed_aggr_method=conditioning_embed_aggr_method, num_conditioning_embeds=num_conditioning_embeds)
+                    for _ in range(n_layers)
+                ])
             self.conditioning_modules = nn.ModuleList([
                 VisualConditioningModule(d_model, visual_conditioning_method, modality_dropout_prob=modality_dropout_prob)
                 for _ in range(n_layers)
             ])
+        else:
+            raise NotImplementedError("Currently, at least one of use_pre_pe_visual_conditioning or use_visual_conditioning_on_all_layers must be True.")
 
     def unfreeze_visual_parameters(self):
-        self.pre_pe_visual_processing.train()
-        self.pre_pe_visual_conditioning.train()
-        self.processing_modules.train()
-        self.conditioning_modules.train()
+        if self.share_visual_preprocessing:
+            self.shared_visual_processing.train()
+            for param in self.shared_visual_processing.parameters():
+                param.requires_grad = True
+        
+        if self.use_pre_pe_visual_conditioning:
+            if not self.share_visual_preprocessing:
+                self.pre_pe_visual_processing.train()
+                for param in self.pre_pe_visual_processing.parameters():
+                    param.requires_grad = True
+            
+            self.pre_pe_visual_conditioning.train()
+            for param in self.pre_pe_visual_conditioning.parameters():
+                param.requires_grad = True
 
-        for param in self.pre_pe_visual_processing.parameters():
-            param.requires_grad = True
-        for param in self.pre_pe_visual_conditioning.parameters():
-            param.requires_grad = True
-
-        for param in self.processing_modules.parameters():
-            param.requires_grad = True
-        for param in self.conditioning_modules.parameters():
-            param.requires_grad = True
+        if self.use_visual_conditioning_on_all_layers:
+            if not self.share_visual_preprocessing:
+                self.processing_modules.train()
+                for param in self.processing_modules.parameters():
+                    param.requires_grad = True
+            
+            self.conditioning_modules.train()
+            for param in self.conditioning_modules.parameters():
+                param.requires_grad = True
 
         if self.use_visual_adapter_encoder:
             self.visual_adapter_encoder.train()
@@ -785,8 +812,15 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             vis_pad_mask, vis_att_mask = self._create_masks(att_context_size=[-1, -1], padding_length=visual_embed_lengths, max_audio_length=visual_embeds.size(1), offset=None, device=visual_embeds.device)
             visual_embeds = self.visual_adapter_encoder(visual_embeds.squeeze(dim=2), att_mask=vis_att_mask, pad_mask=vis_pad_mask).unsqueeze(dim=2)
 
+        # Preprocess visual embeddings once if sharing preprocessing modules
+        if self.share_visual_preprocessing:
+            downsampled_visual_embeds_shared = self.shared_visual_processing(visual_embeds, audio_signal)
+
         if self.use_pre_pe_visual_conditioning:
-            downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
+            if self.share_visual_preprocessing:
+                downsampled_visual_embeds = downsampled_visual_embeds_shared
+            else:
+                downsampled_visual_embeds = self.pre_pe_visual_processing(visual_embeds, audio_signal)
             audio_signal = self.pre_pe_visual_conditioning(audio_signal, downsampled_visual_embeds, att_mask)
 
         # audio_signal = audio_signal + downsampled_visual_embeds
@@ -831,8 +865,18 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                 audio_signal = self.fddts[lth](audio_signal, stno_mask)
 
             if self.use_visual_conditioning_on_all_layers:
-                downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
-                audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds, att_mask)
+                if self.share_visual_preprocessing:
+                    # Reuse the shared preprocessed visual embeddings
+                    audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds_shared, att_mask)
+                else:
+                    # Use per-layer preprocessing
+                    downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
+                    audio_signal = self.conditioning_modules[lth](audio_signal, downsampled_visual_embeds, att_mask)
+            else:
+                raise NotImplementedError("Currently, at least one of use_pre_pe_visual_conditioning or use_visual_conditioning_on_all_layers must be True.")
+            
+            # if stno_mask is not None:
+            #     audio_signal = self.fddts[lth](audio_signal, stno_mask)
 
             audio_signal = layer(
                 x=audio_signal,
