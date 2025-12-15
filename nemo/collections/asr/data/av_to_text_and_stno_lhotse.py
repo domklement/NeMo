@@ -625,47 +625,51 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
 
         # STNO MASK CREATION
-        spk_activity_mask = torch.zeros((len(spk_to_id), downsampled_fl_length))
-        if self.use_asd_for_stno:
-            spk_to_asd_logits = dict()
-            max_len = 0
-            for speaker in all_speakers:
-                with open(self._replace_path(cut.custom['per_spk_asd'][speaker]), 'r') as f:
-                    spk_to_asd_logits[speaker] = json.load(f)
-                    if len(spk_to_asd_logits[speaker]) > max_len:
-                        max_len = len(spk_to_asd_logits[speaker])
-            
-            assert self.VIDEO_FPS % downsampled_freq == 0, f"Video FPS {self.VIDEO_FPS} is not divisible by downsampled frequency {downsampled_freq}"
-            video_downsampling_factor = int(self.VIDEO_FPS // downsampled_freq)
-            for speaker in all_speakers:
-                assert len(spk_to_asd_logits[speaker]) == max_len, f"ASD length mismatch for speaker {speaker} in cut {cut.id}"
-                # FPS - 25Hz, We need 12.5 -> avg downsample.
-                # We need to either shorten or pad the logits to be able to perform the downsampling well.
+        if self.return_stno:
+            spk_activity_mask = torch.zeros((len(spk_to_id), downsampled_fl_length))
+            if self.use_asd_for_stno:
+                spk_to_asd_logits = dict()
+                max_len = 0
+                for speaker in all_speakers:
+                    with open(self._replace_path(cut.custom['per_spk_asd'][speaker]), 'r') as f:
+                        spk_to_asd_logits[speaker] = json.load(f)
+                        if len(spk_to_asd_logits[speaker]) > max_len:
+                            max_len = len(spk_to_asd_logits[speaker])
                 
-                # We need to pad and downsample the ASD logits.
-                spk_asd_logits = list(spk_to_asd_logits[speaker].values())[start_vid_idx:end_vid_idx]
-                if len(spk_asd_logits) < video_downsampling_factor*downsampled_fl_length:
-                    spk_asd_logits = spk_asd_logits + [0.0] * (video_downsampling_factor*downsampled_fl_length - len(spk_asd_logits))
-                elif len(spk_asd_logits) > video_downsampling_factor*downsampled_fl_length:
-                    spk_asd_logits = spk_asd_logits[:video_downsampling_factor*downsampled_fl_length]
-                spk_asd_logits = torch.tensor(spk_asd_logits, dtype=torch.float32).reshape(downsampled_fl_length, video_downsampling_factor).mean(dim=1)
+                assert self.VIDEO_FPS % downsampled_freq == 0, f"Video FPS {self.VIDEO_FPS} is not divisible by downsampled frequency {downsampled_freq}"
+                video_downsampling_factor = int(self.VIDEO_FPS // downsampled_freq)
+                for speaker in all_speakers:
+                    assert len(spk_to_asd_logits[speaker]) == max_len, f"ASD length mismatch for speaker {speaker} in cut {cut.id}"
+                    # FPS - 25Hz, We need 12.5 -> avg downsample.
+                    # We need to either shorten or pad the logits to be able to perform the downsampling well.
+                    
+                    # We need to pad and downsample the ASD logits.
+                    spk_asd_logits = list(spk_to_asd_logits[speaker].values())[start_vid_idx:end_vid_idx]
+                    if len(spk_asd_logits) < video_downsampling_factor*downsampled_fl_length:
+                        spk_asd_logits = spk_asd_logits + [0.0] * (video_downsampling_factor*downsampled_fl_length - len(spk_asd_logits))
+                    elif len(spk_asd_logits) > video_downsampling_factor*downsampled_fl_length:
+                        spk_asd_logits = spk_asd_logits[:video_downsampling_factor*downsampled_fl_length]
+                    spk_asd_logits = torch.tensor(spk_asd_logits, dtype=torch.float32).reshape(downsampled_fl_length, video_downsampling_factor).mean(dim=1)
 
-                assert len(spk_asd_logits) == downsampled_fl_length, f"ASD length after downsampling mismatch for speaker {speaker} in cut {cut.id}"
-                spk_activity_mask[spk_to_id[speaker], :] = (spk_asd_logits > 0).float()
+                    assert len(spk_asd_logits) == downsampled_fl_length, f"ASD length after downsampling mismatch for speaker {speaker} in cut {cut.id}"
+                    spk_activity_mask[spk_to_id[speaker], :] = (spk_asd_logits > 0).float()
+            else:
+                for s in cut.supervisions:
+                    if not self.tokenizer(s.text):
+                        continue
+                    if s.start < rand_start or s.end > rand_end:
+                        continue
+                    sup_start = s.start - rand_start
+                    sup_end = s.end - rand_start
+                    start_idx = int(sup_start * downsampled_freq)
+                    end_idx = int(sup_end * downsampled_freq)
+                    spk_activity_mask[spk_to_id[s.speaker], start_idx:end_idx] = 1.
+            
+            stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[spk])
+            stno_len = torch.tensor(stno_mask.shape[1], dtype=torch.long)
         else:
-            for s in cut.supervisions:
-                if not self.tokenizer(s.text):
-                    continue
-                if s.start < rand_start or s.end > rand_end:
-                    continue
-                sup_start = s.start - rand_start
-                sup_end = s.end - rand_start
-                start_idx = int(sup_start * downsampled_freq)
-                end_idx = int(sup_end * downsampled_freq)
-                spk_activity_mask[spk_to_id[s.speaker], start_idx:end_idx] = 1.
-        
-        stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[spk])
-        stno_len = torch.tensor(stno_mask.shape[1], dtype=torch.long)
+            stno_mask = torch.tensor([[]])
+            stno_len = torch.tensor(0, dtype=torch.long)
 
         # VISUAL FEATURES LOADING
         if self.return_visual_features and self.visual_features_key is not None:

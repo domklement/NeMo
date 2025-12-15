@@ -600,6 +600,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         share_visual_preprocessing: bool = False,
         multi_speaker_visual_conditioning: bool = False,
         max_num_speakers: int = 8,
+        use_stno: bool = True,
     ):
         super().__init__(
             feat_in=feat_in,
@@ -655,6 +656,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.share_visual_preprocessing = share_visual_preprocessing
         self.multi_speaker_visual_conditioning = multi_speaker_visual_conditioning
         self.max_num_speakers = max_num_speakers
+        self.use_stno = use_stno
 
         if self.use_visual_adapter_encoder:
             self.visual_adapter_encoder = VisionAdapterEncoder(
@@ -816,6 +818,9 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
                 (audio_signal.size(0),), audio_signal.size(-1), dtype=torch.int64, device=audio_signal.device
             )
 
+        if stno_mask is not None and stno_mask.numel() == 0 or not self.use_stno:
+            stno_mask = None
+
         if not self.multi_speaker_visual_conditioning and len(visual_embeds.shape) == 5:
             # Squeeze the speaker dimension if not using multi-speaker visual conditioning
             visual_embeds = visual_embeds.squeeze(dim=2)  # (B, T, C, D)
@@ -906,14 +911,15 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             cache_last_time_next = []
             cache_last_channel_next = []
 
-        if stno_mask.shape[-1] != audio_signal.shape[1]:
-            # print('DIFF SHAPES, stno_mask shape: ', stno_mask.shape, 'audio_signal shape: ', audio_signal.shape)
-            if stno_mask.shape[-1] > audio_signal.shape[1]:
-                stno_mask = stno_mask[:, :, :audio_signal.shape[1]]
-            else:
-                stno_mask = nn.functional.pad(stno_mask, (0, audio_signal.shape[1] - stno_mask.shape[-1]))
-        
-        assert stno_mask.shape[-1] == audio_signal.shape[1]
+        if stno_mask is not None:
+            if stno_mask.shape[-1] != audio_signal.shape[1]:
+                # print('DIFF SHAPES, stno_mask shape: ', stno_mask.shape, 'audio_signal shape: ', audio_signal.shape)
+                if stno_mask.shape[-1] > audio_signal.shape[1]:
+                    stno_mask = stno_mask[:, :, :audio_signal.shape[1]]
+                else:
+                    stno_mask = nn.functional.pad(stno_mask, (0, audio_signal.shape[1] - stno_mask.shape[-1]))
+            
+            assert stno_mask.shape[-1] == audio_signal.shape[1]
 
         for lth, (drop_prob, layer) in enumerate(zip(self.layer_drop_probs, self.layers)):
             original_signal = audio_signal
