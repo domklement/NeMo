@@ -861,7 +861,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
             # crop to original T (remove last-chunk padding) and return (B, T, 1, D)
             av_feats = av_feats[:, :T, :]
-            return av_feats.unsqueeze(2)
+
+            # Lately, to support all the speakers, we need to have visual features of shape (B, T, S, C, D)
+            return av_feats.unsqueeze(2).unsqueeze(2)
         else:
             # Process chunks one-by-one (batched across samples) to avoid global padding.
             chunk_outputs = []
@@ -899,7 +901,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             assert av_feats.shape[0] == video_frames.shape[0], f"Expected B={video_frames.shape[0]}, got {av_feats.shape[0]}"
             assert av_feats.shape[1] == video_frames.shape[1], f"Expected T={video_frames.shape[1]}, got {av_feats.shape[1]}"
 
-            return av_feats.unsqueeze(2)
+            # Lately, to support all the speakers, we need to have visual features of shape (B, T, S, C, D)
+            return av_feats.unsqueeze(2).unsqueeze(2)
 
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
@@ -1403,6 +1406,45 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         # for name, param in self.named_parameters():
         #     if param.grad is None:
         #         print(f"⚠️ No gradient: {name}")
+
+        # Compute gradient L2 norms (encoder/decoder/joint/total) and log
+        def _module_grad_norm(module):
+            norms = []
+            for _, p in module.named_parameters():
+                if p.grad is not None:
+                    g = p.grad
+                    try:
+                        norms.append(g.detach().data.norm(2))
+                    except Exception:
+                        pass
+            if len(norms) == 0:
+                return None
+            return torch.sqrt(torch.sum(torch.stack([n * n for n in norms])))
+
+        enc_norm = _module_grad_norm(self.encoder) if hasattr(self, 'encoder') else None
+        dec_norm = _module_grad_norm(self.decoder) if hasattr(self, 'decoder') else None
+        jnt_norm = _module_grad_norm(self.joint) if hasattr(self, 'joint') else None
+
+        # Total grad norm across all params
+        total_norm_terms = []
+        for _, p in self.named_parameters():
+            if p.grad is not None:
+                try:
+                    n = p.grad.detach().data.norm(2)
+                    total_norm_terms.append(n * n)
+                except Exception:
+                    pass
+        total_norm = torch.sqrt(torch.sum(torch.stack(total_norm_terms))) if len(total_norm_terms) else None
+
+        # Log via lightning's logger (appears in TensorBoard/WandB)
+        if enc_norm is not None:
+            self.log('grad_norm/encoder', enc_norm, prog_bar=False, on_step=True, on_epoch=False)
+        if dec_norm is not None:
+            self.log('grad_norm/decoder', dec_norm, prog_bar=False, on_step=True, on_epoch=False)
+        if jnt_norm is not None:
+            self.log('grad_norm/joint', jnt_norm, prog_bar=False, on_step=True, on_epoch=False)
+        if total_norm is not None:
+            self.log('grad_norm/total', total_norm, prog_bar=False, on_step=True, on_epoch=False)
 
         if self._optim_variational_noise_std > 0 and self.global_step >= self._optim_variational_noise_start:
             for param_name, param in self.decoder.named_parameters():

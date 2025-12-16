@@ -200,6 +200,7 @@ class VisualConditioningModule(nn.Module):
                 xscale=True,
                 dropout_rate_emb=0.1,
             )
+            self.out_dropout = nn.Dropout(0.1)
 
             device = next(self.parameters()).device
             dtype = next(self.parameters()).dtype
@@ -219,10 +220,10 @@ class VisualConditioningModule(nn.Module):
         elif self.visual_conditioning_method == 'film':
             conditioned_audio = self.film_layer(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'cross_attn':
-            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
+            conditioned_audio = audio_signal + self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask)
         elif self.visual_conditioning_method == 'rel_pos_cross_attn':
             visual_embeds, pe = self.pos_enc(visual_embeds, cache_len=0)
-            conditioned_audio = self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask, pos_emb=pe)
+            conditioned_audio = audio_signal + self.out_dropout(self.cross_attn(query=audio_signal, key=visual_embeds, value=visual_embeds, mask=att_mask, pos_emb=pe))
         else:
             raise ValueError(f'Unknown visual conditioning method: {self.visual_conditioning_method}')
         
@@ -657,6 +658,10 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
         self.multi_speaker_visual_conditioning = multi_speaker_visual_conditioning
         self.max_num_speakers = max_num_speakers
         self.use_stno = use_stno
+
+        if not self.use_stno:
+            del self.fddts
+            self.fddts = None
 
         if self.use_visual_adapter_encoder:
             self.visual_adapter_encoder = VisionAdapterEncoder(
