@@ -40,6 +40,7 @@ from typing import Dict, List, Optional
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from tqdm import tqdm
+import warnings
 
 from webvtt import WebVTT
 from torchcodec.decoders import AudioDecoder, VideoDecoder
@@ -74,6 +75,27 @@ def time_to_seconds(t: str) -> float:
             return m * 60.0 + s
         else:
             return float(parts[0])
+
+
+def build_asd_candidate_paths(session_dir: Path, session_name: str, speaker_id: str, filled_asd_root: Path = None) -> List[Path]:
+    """Build candidate paths for per-speaker ASD JSON files.
+    
+    If filled_asd_root is provided, tries:
+      - filled_asd_root / session_name / 'speakers' / speaker_id / 'tracks_filled_asd.json'
+    
+    Always tries:
+      - session_dir / 'speakers' / speaker_id / 'tracks_filled_asd.json'
+      - session_dir.parent / session_name / 'speakers' / speaker_id / 'tracks_filled_asd.json'
+    """
+    candidates = []
+    fname = 'tracks_filled_asd.json'
+    if filled_asd_root is not None:
+        candidates.append(Path(filled_asd_root) / session_name / 'speakers' / speaker_id / fname)
+    # try in-session speakers folder
+    candidates.append(session_dir / 'speakers' / speaker_id / fname)
+    # try session_dir.parent / session_name / speakers / ...
+    candidates.append(session_dir.parent / session_name / 'speakers' / speaker_id / fname)
+    return candidates
 
 
 def parse_vtt_segments(vtt_path: Path) -> List[Dict]:
@@ -147,7 +169,7 @@ def find_sessions(orig_root: Path) -> List[Path]:
     return sessions
 
 
-def _process_session(session_path_str: str, orig_root_str: str, filled_root_str: str, vis_features: Optional[Dict[str, str]] = None) -> Dict:
+def _process_session(session_path_str: str, orig_root_str: str, filled_root_str: str, vis_features: Optional[Dict[str, str]] = None, filled_asd_root_str: Optional[str] = None, allow_missing_asd: bool = False, use_uem: bool = False) -> Dict:
     """Process a single session and return a serializable dict with result or error.
 
     This function is defined at module scope so it can be pickled by multiprocessing.Pool.
@@ -169,16 +191,37 @@ def _process_session(session_path_str: str, orig_root_str: str, filled_root_str:
         central_audio_info = get_audio_info_torchcodec(str(central_video_path))
     except Exception as e:
         return {"error": f"Failed to read central video/audio for {session}: {e}", "session": str(session)}
+    
+    if use_uem:
+        with open(session / "metadata.json", "r") as f:
+            metadata = json.load(f)
+            uem_start = -1
+            uem_end = -1
+
+            for spk in metadata:
+                uem = metadata[spk]["central"]["uem"]
+                if uem_start < 0 or uem_end < 0:
+                    uem_start = float(uem["start"])
+                    uem_end = float(uem["end"])
+                else:
+                    assert uem_start == float(uem["start"]) and uem_end == float(uem["end"]), "Inconsistent UEM across speakers"
+    else:
+        uem_start = 0.0
+        uem_end = central_audio_info.get("duration")
 
     cut_id = f"{session.name}"
     per_spk_face: Dict[str, str] = {}
     per_spk_lip: Dict[str, str] = {}
+    per_spk_asd: Dict[str, Optional[str]] = {}
     supervisions: List[Dict] = []
     
     per_spk_features: Dict[str, Dict[str, str]] = dict()
-    for k, v in vis_features.items():
+    if vis_features:
+        for k, v in vis_features.items():
             per_spk_features[k] = dict()
             per_spk_features[k] = {spk_dir.name: str(Path(v).joinpath(session.name, spk_dir.name, "all_tracks.pt")) for spk_dir in speaker_dirs}
+
+    filled_asd_root = Path(filled_asd_root_str) if filled_asd_root_str else None
 
     for spk_dir in speaker_dirs:
         spk_name = spk_dir.name
@@ -199,12 +242,37 @@ def _process_session(session_path_str: str, orig_root_str: str, filled_root_str:
         else:
             return {"error": f"Missing lip video for {spk_name} in {filled_spk_dir}", "session": str(session)}
 
+        # Find per-speaker ASD file
+        asd_candidates = build_asd_candidate_paths(session, session.name, spk_name, filled_asd_root)
+        asd_path = None
+        for candidate in asd_candidates:
+            if candidate.exists():
+                asd_path = str(candidate.resolve())
+                break
+        
+        if asd_path is None and allow_missing_asd and asd_candidates:
+            # set the first candidate as the expected path even if missing
+            asd_path = str(asd_candidates[0])
+        
+        per_spk_asd[spk_name] = asd_path
+
         # read vtt segments for this speaker
         segments = parse_vtt_segments(transcript_path)
         for i, seg in enumerate(segments):
             seg_start = float(seg["start"])
             seg_end = float(seg["end"])
+
+            if seg_end < uem_start or seg_start > uem_end:
+                warnings.warn(f"Segment [{seg_start}, {seg_end}] entirely out of UEM bounds [{uem_start}, {uem_end}] for speaker {spk_name} in session {session}. Skipping it.")
+                continue
+
+            if seg_start < uem_start or seg_end > uem_end:
+                warnings.warn(f"Segment [{seg_start}, {seg_end}] out of UEM bounds [{uem_start}, {uem_end}] for speaker {spk_name} in session {session}. Cutting it to fit UEM.")
+                seg_end = min(seg_end, uem_end+0.5)
+
             seg_dur = max(0.0, seg_end - seg_start)
+
+            # UEM start is substracted when creating SupervisionSegment in build_manifests.
             supervisions.append({
                 "id": f"{cut_id}_{i}",
                 "recording_id": cut_id,
@@ -218,18 +286,21 @@ def _process_session(session_path_str: str, orig_root_str: str, filled_root_str:
 
     result = {
         "cut_id": cut_id,
+        "cut_start": uem_start,
+        "cut_duration": uem_end - uem_start,
         "central_video_path": str(central_video_path),
         "central_video_info": central_video_info,
         "central_audio_info": central_audio_info,
         "per_spk_face": per_spk_face,
         "per_spk_lip": per_spk_lip,
+        "per_spk_asd": per_spk_asd,
         "supervisions": supervisions,
         "vis_features": per_spk_features,
     }
     return {"result": result}
 
 
-def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[int] = None, vis_features: Optional[Dict[str, str]] = None) -> CutSet:
+def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[int] = None, vis_features: Optional[Dict[str, str]] = None, filled_asd_root: Optional[Path] = None, allow_missing_asd: bool = False, use_uem: bool = False) -> CutSet:
     """Traverse sessions and build Lhotse RecordingSet and CutSet.
 
     For each speaker we create a Recording (face video) and a MonoCut that spans the
@@ -242,12 +313,12 @@ def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[in
     logging.info(f"Found {len(sessions)} sessions under {orig_root}")
 
     # worker that processes a single session and returns a serializable dict
-    # Use the module-level _process_session (defined above) which is picklable by multiprocessing.Pool
+    # Use the module-level _process_ses§sion (defined above) which is picklable by multiprocessing.Pool
 
     # Run processing in parallel with a progress bar
     sessions_strs = [str(s) for s in sessions]
     results: List[Dict] = []
-    worker = partial(_process_session, orig_root_str=str(orig_root), filled_root_str=str(filled_root), vis_features=vis_features)
+    worker = partial(_process_session, orig_root_str=str(orig_root), filled_root_str=str(filled_root), vis_features=vis_features, filled_asd_root_str=str(filled_asd_root) if filled_asd_root else None, allow_missing_asd=allow_missing_asd, use_uem=use_uem)
     # determine number of workers: use user-provided if given, otherwise use cpu_count()
     if num_workers is None:
         num_workers = min(cpu_count(), max(1, len(sessions_strs)))
@@ -271,6 +342,13 @@ def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[in
         central_video_path = Path(payload["central_video_path"])
         central_video_info = payload["central_video_info"]
         central_audio_info = payload["central_audio_info"]
+
+        if use_uem:
+            uem_start = payload["cut_start"]
+            uem_duration = payload["cut_duration"]
+        else:
+            uem_start = 0.0
+            uem_duration = central_audio_info.get("duration")
 
         recording = Recording(
             id=cut_id,
@@ -298,7 +376,7 @@ def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[in
             s = SupervisionSegment(
                 id=sup["id"],
                 recording_id=sup["recording_id"],
-                start=sup["start"],
+                start=sup["start"] - uem_start,
                 duration=sup["duration"],
                 channel=sup["channel"],
                 speaker=sup["speaker"],
@@ -307,18 +385,21 @@ def build_manifests(orig_root: Path, filled_root: Path, num_workers: Optional[in
             )
             supervisions.append(s)
         
+        custom_fields = {
+            "per_spk_face_crop_videos": payload["per_spk_face"],
+            "per_spk_lip_crop_videos": payload["per_spk_lip"],
+            "per_spk_asd": payload["per_spk_asd"],
+            **(payload['vis_features'] if 'vis_features' in payload else {})
+        }
+        
         cut = MonoCut(
             id=f"{cut_id}_cut0",
-            start=0.0,
-            duration=central_audio_info.get("duration"),
+            start=uem_start,
+            duration=uem_duration,
             channel=recording.channel_ids,
             recording=recording,
             supervisions=supervisions,
-            custom={
-                "per_spk_face_crop_videos": payload["per_spk_face"],
-                "per_spk_lip_crop_videos": payload["per_spk_lip"],
-                **(payload['vis_features'] if 'vis_features' in payload else {})
-            },
+            custom=custom_fields,
         )
         cuts.append(cut)
 
@@ -332,6 +413,9 @@ def main():
     parser.add_argument("--output-cuts", required=True, type=Path, help="Output cuts manifest path (json)")
     parser.add_argument('--visual-feature-keys', type=str, nargs='+', default=None, help="List of visual feature keys to include in the cuts' custom fields")
     parser.add_argument('--visual-feature-dirs', type=str, nargs='+', default=None, help="List of directories containing visual features corresponding to the keys")
+    parser.add_argument('--filled-asd-root', type=Path, default=None, help="Root where filled ASD JSON outputs live (optional)")
+    parser.add_argument('--allow-missing-asd', action='store_true', help="Allow missing ASD files and still write expected path")
+    parser.add_argument('--use-uem', action='store_true', help="Use UEM files for segmenting the recordings")
     parser.add_argument('--num-workers', type=int, default=None, help="Number of parallel workers to use")
 
     args = parser.parse_args()
@@ -340,7 +424,7 @@ def main():
     if VideoDecoder is None:
         logging.error("torchcodec.VideoDecoder is not importable. Please install torchcodec to proceed.")
 
-    cuts_set = build_manifests(args.orig_root, args.filled_root, num_workers=args.num_workers, vis_features=dict(list(zip(args.visual_feature_keys or [], args.visual_feature_dirs or []))))
+    cuts_set = build_manifests(args.orig_root, args.filled_root, num_workers=args.num_workers, vis_features=dict(list(zip(args.visual_feature_keys or [], args.visual_feature_dirs or []))), filled_asd_root=args.filled_asd_root, allow_missing_asd=args.allow_missing_asd, use_uem=args.use_uem)
 
     logging.info(f"Writing cuts to {args.output_cuts}")
     cuts_set.to_file(str(args.output_cuts))

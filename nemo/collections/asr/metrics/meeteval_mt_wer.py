@@ -99,7 +99,7 @@ class MeetevalMTWER(Metric):
         utt_ids: torch.Tensor,
         spk_ids: torch.Tensor,
     ):
-        print(spk_ids, utt_ids)
+        # print(spk_ids, utt_ids)
         with torch.no_grad():
             # Each decoded obj contains text and y_sequence - not collapsed seq.
             # To get collapsed seq tokens, the easiest hack is to tokenize the text back to ids.

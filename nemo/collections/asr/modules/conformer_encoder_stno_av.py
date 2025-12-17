@@ -99,7 +99,7 @@ class VisualProcessingModule(nn.Module):
         if conditioning_embed_aggr_method == 'wavg':
             self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds) / self.num_conditioning_embeds)
 
-    def forward(self, visual_embeds, audio_signal):
+    def forward(self, visual_embeds, audio_signal=None):
         is_multispeaker = len(visual_embeds.shape) == 5
         if is_multispeaker:
             B_orig, T_orig, S_orig, C, D = visual_embeds.shape
@@ -120,7 +120,7 @@ class VisualProcessingModule(nn.Module):
         ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
 
         # Sometimes, the audio shape can be off-by-one. Fix it by either getting rid of or adding one frame.
-        shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1]
+        shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1] if audio_signal is not None else 0
         if shape_diff == 1:
             downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,1,0,0))
         elif shape_diff == -1:

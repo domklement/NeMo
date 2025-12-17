@@ -148,7 +148,6 @@ def create_cut_from_video(video_path: Path, base_name: str, dataset_part: str) -
             text=transcript,
             language='en',
             speaker=speaker_id,
-            custom={'video_path': str(video_path)}
         )
 
         # Create MonoCut
@@ -159,7 +158,7 @@ def create_cut_from_video(video_path: Path, base_name: str, dataset_part: str) -
             channel=0,
             supervisions=[supervision],
             recording=recording,
-            custom={'dataset_part': dataset_part, 'sample_id': sample_id}
+            custom={'dataset_part': dataset_part, 'sample_id': sample_id, 'per_spk_lip_crop_videos': {speaker_id: str(video_path)}}
         )
 
         return cut

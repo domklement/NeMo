@@ -91,6 +91,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         super().__init__(cfg=cfg, trainer=trainer)
 
+        self.use_audio_encoder = cfg.get("use_audio_encoder", True)
+        self.freeze_rnnt = cfg.get("freeze_rnnt", False)
+
         # Initialize components
         self.preprocessor = EncDecRNNTModelSTNOAV.from_config_dict(self.cfg.preprocessor)
         self.encoder = EncDecRNNTModelSTNOAV.from_config_dict(self.cfg.encoder)
@@ -202,6 +205,32 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 param.requires_grad = False
             
             self.encoder.unfreeze_visual_parameters()
+
+        if self.freeze_rnnt:
+            logging.info("Freezing RNNT parameters for optimizer setup.")
+            self.decoder.eval()
+            self.joint.eval()
+
+            for p in self.decoder.parameters():
+                p.requires_grad = False
+
+            for p in self.joint.parameters():
+                p.requires_grad = False
+
+        if not self.use_audio_encoder:
+            logging.info("Freezing audio encoder parameters for optimizer setup.")
+            self.encoder.eval()
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+
+            # If we are not using audio encoder, we'll replace it by visual encoder.
+            # There, we need to downsample representations by the same factor.
+            # Hence, we will unfreeze it.
+            # TODO: Make the visual pre-processor part of this module instead of the enocder and let's keep with a shared encoder for all the future experiments.
+            assert self.cfg.get('encoder').get('share_visual_preprocessing')
+            self.encoder.shared_visual_processing.train()
+            for p in self.encoder.shared_visual_processing.parameters():
+                p.requires_grad = True
 
 
     def setup_optim_normalization(self):
@@ -785,25 +814,26 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         )
         return encoded, encoded_len
 
-    def avhubert_get_visual_feats(self, video_frames, video_lengths):
-        # avhubert_audio_feats = torch.stack([self.audio_transform(signal[i].cpu()) for i in range(len(signal))], 
-        #                                    dim=0).to(signal.device)
-        avhubert_video_frames = video_frames
-        attn_mask = make_non_pad_mask(video_lengths).to(video_frames.device)
-        av_feats = self.vis_feat_extractor.avsr.encoder(
-            input_features=None,
-            video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
-            attention_mask=attn_mask,
-        ).last_hidden_state.unsqueeze(2)
-        return av_feats
+    # def avhubert_get_visual_feats(self, video_frames, video_lengths):
+    #     # avhubert_audio_feats = torch.stack([self.audio_transform(signal[i].cpu()) for i in range(len(signal))], 
+    #     #                                    dim=0).to(signal.device)
+    #     avhubert_video_frames = video_frames
+    #     attn_mask = make_non_pad_mask(video_lengths).to(video_frames.device)
+    #     av_feats = self.vis_feat_extractor.avsr.encoder(
+    #         input_features=None,
+    #         video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
+    #         attention_mask=attn_mask,
+    #     ).last_hidden_state.unsqueeze(2)
+    #     return av_feats
     
-    def get_visual_feats(self, signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched: bool = True):
+    def get_visual_feats(self, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched: bool = True):
         if self.visual_encoder_type != 'avhubert':
             raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 
         # If not chunking, defer to single-call implementation
         if inference_mode != 'chunk' or chunk_length is None:
-            return self.avhubert_get_visual_feats(signal, signal_len, video_frames, video_lengths)
+            # return self.avhubert_get_visual_feats(signal, signal_len, video_frames, video_lengths)
+            raise NotImplementedError("Non-chunked visual feature extraction is not implemented yet.")
 
         # video_frames expected shape: (B, T, C, H, W)
         # video_lengths expected shape: (B,)
@@ -903,6 +933,20 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
             # Lately, to support all the speakers, we need to have visual features of shape (B, T, S, C, D)
             return av_feats.unsqueeze(2).unsqueeze(2)
+        
+    def get_visual_encoder_embeds(self, av_feats, video_lengths, num_speakers):
+        assert self.extract_features_on_the_fly, "extract_features_on_the_fly must be True to use get_visual_encoder_embeds"
+
+        # av_feats = self.get_visual_feats(video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+        processed_visual_embeds = self.encoder.shared_visual_processing(visual_embeds=av_feats, audio_signal=None)
+        vis_downsampling_factor = self.encoder.shared_visual_processing.visual_downsampling_factor
+        processed_visual_embed_lengths = ((video_lengths.float() / vis_downsampling_factor).ceil()).long()
+
+        assert processed_visual_embeds.shape[2] == 1, f"Expected S=1, got {processed_visual_embeds.shape[2]}"
+        
+        # The output dimensionality of the encoder is: (B, D, T)
+        return processed_visual_embeds.squeeze(2).permute(0, 2, 1), processed_visual_embed_lengths
+
 
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
@@ -917,7 +961,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             sample_id = None
 
         if self.extract_features_on_the_fly:
-            av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            av_feats = self.get_visual_feats(video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
             if self.replace_zero_video_frames_with_zero_embeds:
@@ -925,11 +969,15 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                     visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
 
-        # forward() only performs encoder forward
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+        if self.use_audio_encoder:
+            # forward() only performs encoder forwardf
+            if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+                encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+            else:
+                encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+            # We Assume that we are only using the vision encocder and will train it as a lip-reading model.
+            encoded, encoded_len = self.get_visual_encoder_embeds(visual_embeds, video_lengths, num_speakers)
         
         del signal
         del signal_len
@@ -937,6 +985,10 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         del stno_mask_len
         del visual_embeds
         del visual_embed_lengths
+        del video_frames
+        del video_lengths
+        del zero_frame_idxes
+        del zero_frame_lengths
         del num_speakers
 
         # During training, loss must be computed, so decoder forward is necessary
@@ -1049,43 +1101,34 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         assert len(signal) == 1
 
         if self.extract_features_on_the_fly:
-            av_feats = self.get_visual_feats(signal, signal_len, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            av_feats = self.get_visual_feats(video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
             if self.replace_zero_video_frames_with_zero_embeds:
                 for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
                     visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
-        # # We need to pad the signal to match the # of video frames. It gets automatically padded in the conformer encoder, 
-        # # but we have different sampling rate - 25FPS vs 12.5Hz (fastconformer).
-        # av_diff = video_frames.shape[1]*640 - signal.shape[1] # 640 = 16000/25 - upsampling ratio from video to audio.
-        # padded_signal = signal
-        # if av_diff > 0:
-        #     padded_signal = torch.nn.functional.pad(signal, (0, av_diff))
-        # elif av_diff < 0:
-        #     padded_signal = signal[:, :-av_diff]
-
-        # avhubert_audio_feats = torch.stack([self.audio_transform(padded_signal[i].cpu()) for i in range(len(signal))], 
-        #                                    dim=0).to(signal.device)
-        
-        # avhubert_video_frames = video_frames
-        # with torch.no_grad():
-        #     av_feats = self.vis_feat_extractor.avsr.encoder(
-        #         input_features=avhubert_audio_feats.permute(0, 2, 1),
-        #         video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
-        #     ).last_hidden_state.unsqueeze(2)
-
-        # print('Signal shape', signal.shape)
-
         # forward() only performs encoder forward
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+        if self.use_audio_encoder:
+            # forward() only performs encoder forwardf
+            if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+                encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+            else:
+                encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len, stno_mask=stno_mask, stno_mask_length=stno_mask_len, visual_embeds=visual_embeds, visual_embed_lengths=visual_embed_lengths, num_speakers=num_speakers)
+            # We Assume that we are only using the vision encocder and will train it as a lip-reading model.
+            encoded, encoded_len = self.get_visual_encoder_embeds(visual_embeds, video_lengths, num_speakers)
+
         del signal
         del signal_len
+        del stno_mask
+        del stno_mask_len
         del visual_embeds
         del visual_embed_lengths
+        del video_frames
+        del video_lengths
+        del zero_frame_idxes
+        del zero_frame_lengths
         del num_speakers
 
         tensorboard_logs = {}
@@ -1400,6 +1443,21 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config))
         return temporary_datalayer
 
+    # Compute gradient L2 norms (encoder/decoder/joint/total) and log
+    @staticmethod
+    def _module_grad_norm(module):
+        norms = []
+        for _, p in module.named_parameters():
+            if p.grad is not None:
+                g = p.grad
+                try:
+                    norms.append(g.detach().data.norm(2))
+                except Exception:
+                    pass
+        if len(norms) == 0:
+            return None
+        return torch.sqrt(torch.sum(torch.stack([n * n for n in norms])))
+
     def on_after_backward(self):
         super().on_after_backward()
 
@@ -1407,23 +1465,10 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         #     if param.grad is None:
         #         print(f"⚠️ No gradient: {name}")
 
-        # Compute gradient L2 norms (encoder/decoder/joint/total) and log
-        def _module_grad_norm(module):
-            norms = []
-            for _, p in module.named_parameters():
-                if p.grad is not None:
-                    g = p.grad
-                    try:
-                        norms.append(g.detach().data.norm(2))
-                    except Exception:
-                        pass
-            if len(norms) == 0:
-                return None
-            return torch.sqrt(torch.sum(torch.stack([n * n for n in norms])))
-
-        enc_norm = _module_grad_norm(self.encoder) if hasattr(self, 'encoder') else None
-        dec_norm = _module_grad_norm(self.decoder) if hasattr(self, 'decoder') else None
-        jnt_norm = _module_grad_norm(self.joint) if hasattr(self, 'joint') else None
+        enc_norm = self._module_grad_norm(self.encoder) if hasattr(self, 'encoder') else None
+        dec_norm = self._module_grad_norm(self.decoder) if hasattr(self, 'decoder') else None
+        jnt_norm = self._module_grad_norm(self.joint) if hasattr(self, 'joint') else None
+        vis_enc_norm = self._module_grad_norm(self.vis_feat_extractor) if hasattr(self, 'vis_feat_extractor') else None
 
         # Total grad norm across all params
         total_norm_terms = []
@@ -1443,6 +1488,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             self.log('grad_norm/decoder', dec_norm, prog_bar=False, on_step=True, on_epoch=False)
         if jnt_norm is not None:
             self.log('grad_norm/joint', jnt_norm, prog_bar=False, on_step=True, on_epoch=False)
+        if vis_enc_norm is not None:
+            self.log('grad_norm/visual_encoder', vis_enc_norm, prog_bar=False, on_step=True, on_epoch=False)
         if total_norm is not None:
             self.log('grad_norm/total', total_norm, prog_bar=False, on_step=True, on_epoch=False)
 

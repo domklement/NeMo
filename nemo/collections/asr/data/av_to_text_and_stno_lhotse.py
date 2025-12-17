@@ -159,7 +159,9 @@ def _speech_collate_fn(batch, pad_id):
                 visual_embed_i = torch.nn.functional.pad(visual_embed_i, pad)
             # Pad speaker dimension if needed (S_right)
             current_num_speakers = visual_embed_i.shape[1] if visual_embed_i.numel() > 0 else 0
-            if current_num_speakers < max_num_speakers:
+
+            # If the vis embeds tensor is empty, we can't do padding.
+            if current_num_speakers < max_num_speakers and visual_embed_i.numel() > 0:
                 pad = (0, 0, 0, 0, 0, max_num_speakers - current_num_speakers, 0, 0)
                 visual_embed_i = torch.nn.functional.pad(visual_embed_i, pad)
             visual_embeds.append(visual_embed_i)
@@ -548,17 +550,17 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         cut_duration = cut.duration
         spk_specific_supervisions = list(filter(lambda s: s.speaker == spk, cut.supervisions ))
-        
+
         if self.val:
-            rand_start = 0.0
-            rand_end = cut_duration
+            rand_start = cut.start
+            rand_end = cut.start + cut.duration
         else:
             if self.max_training_rand_seg_duration is None or cut_duration <= self.max_training_rand_seg_duration:
-                rand_start = 0.0
-                rand_end = cut_duration
+                rand_start = cut.start
+                rand_end = cut.start + cut.duration
             else:
-                rand_start = random.uniform(0, cut_duration - self.max_training_rand_seg_duration)
-                # rand_start = 0.0 # DEBUG
+                rand_start = random.uniform(cut.start, cut.start + cut.duration - self.max_training_rand_seg_duration)
+                # rand_start = cut.start # DEBUG
                 rand_end = rand_start + self.max_training_rand_seg_duration
 
         selected_supervisions = []
@@ -583,43 +585,47 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         target_spk_id = spk_to_id[spk]
         # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
-        if isinstance(cut, MonoCut):
-            recording_source = self._replace_path(cut.recording.sources[0].source)
-            audio_data = self.featurizer.process(
-                recording_source,
-                offset=start_second,
-                duration=end_second - start_second,
-                trim=self.trim,
-                orig_sr=cut.recording.sampling_rate,
-                channel_selector=self.channel_selector,
-            )
-        elif isinstance(cut, MixedCut):
-            for t in cut.tracks:
-                t.cut.recording.sources[0].source = self._replace_path(t.cut.recording.sources[0].source)
-            
-            audio_data = cut.load_audio()
-            assert audio_data.shape[0] == 1, "Only single channel audio is supported in MixedCut for now."
-            audio_data = audio_data[0, start_sample:end_sample]
+        if self.return_audio:
+            if isinstance(cut, MonoCut):
+                recording_source = self._replace_path(cut.recording.sources[0].source)
+                audio_data = self.featurizer.process(
+                    recording_source,
+                    offset=start_second,
+                    duration=end_second - start_second,
+                    trim=self.trim,
+                    orig_sr=cut.recording.sampling_rate,
+                    channel_selector=self.channel_selector,
+                )
+            elif isinstance(cut, MixedCut):
+                for t in cut.tracks:
+                    t.cut.recording.sources[0].source = self._replace_path(t.cut.recording.sources[0].source)
+                
+                audio_data = cut.load_audio()
+                assert audio_data.shape[0] == 1, "Only single channel audio is supported in MixedCut for now."
+                audio_data = torch.from_numpy(audio_data[0, start_sample:end_sample])
+        else:
+            audio_data = torch.tensor([])
 
         audio_data_len = torch.tensor(audio_data.shape[0], dtype=torch.long)
 
-        # Optionally apply a random contiguous zero-mask to the audio signal (refactored)
-        mask_range = self._get_random_mask_range(int(audio_data.shape[0]))
-        if mask_range is not None:
-            audio_data = self._apply_mask_to_audio(audio_data, mask_range)
+        if self.return_audio:
+            # Optionally apply a random contiguous zero-mask to the audio signal (refactored)
+            mask_range = self._get_random_mask_range(int(audio_data.shape[0]))
+            if mask_range is not None:
+                audio_data = self._apply_mask_to_audio(audio_data, mask_range)
 
-        downsampled_freq = self.sample_rate / self.audio_downsampling_factor
-        downsampled_fl_length = audio_data_len if audio_data_len % self.audio_downsampling_factor == 0 else audio_data_len + (self.audio_downsampling_factor - (audio_data_len % self.audio_downsampling_factor))
-        downsampled_fl_length = int(downsampled_fl_length / self.audio_downsampling_factor)
+            downsampled_freq = self.sample_rate / self.audio_downsampling_factor
+            downsampled_fl_length = audio_data_len if audio_data_len % self.audio_downsampling_factor == 0 else audio_data_len + (self.audio_downsampling_factor - (audio_data_len % self.audio_downsampling_factor))
+            downsampled_fl_length = int(downsampled_fl_length / self.audio_downsampling_factor)
 
-        # From now on, rand_end is adjusted to match the padded signal better.
-        rand_end = rand_start + downsampled_fl_length / downsampled_freq
-        start_sample = int(rand_start * self.sample_rate)
-        start_second = start_sample / self.sample_rate
-        end_sample = int(rand_end * self.sample_rate)
-        end_second = end_sample / self.sample_rate
-        start_vid_idx = int(start_second * self.VIDEO_FPS) # Assuming 25 fps
-        end_vid_idx = int(end_second * self.VIDEO_FPS)
+            # From now on, rand_end is adjusted to match the padded signal better.
+            rand_end = rand_start + downsampled_fl_length / downsampled_freq
+            start_sample = int(rand_start * self.sample_rate)
+            start_second = start_sample / self.sample_rate
+            end_sample = int(rand_end * self.sample_rate)
+            end_second = end_sample / self.sample_rate
+            start_vid_idx = int(start_second * self.VIDEO_FPS) # Assuming 25 fps
+            end_vid_idx = int(end_second * self.VIDEO_FPS)
         
         tokenized_transcript = torch.tensor(self.tokenizer(' '.join([sup.text for sup in selected_supervisions]))).long()
         tokenized_transcript_len = torch.tensor(len(tokenized_transcript), dtype=torch.long)
