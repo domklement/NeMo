@@ -1585,15 +1585,31 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         known_groups = []
         param_groups = []
-        
         fddt_group = []
+        vis_preproc_group = []
+        vis_feat_extractor_group = []
+
         processed_param_names = set()
+
         for n, p in self.named_parameters():
             if 'fddt' in n:
                 processed_param_names.add(n)
                 fddt_group.append(p)
+            elif 'visual_preprocessing' in n:
+                vis_preproc_group.append(p)
+                processed_param_names.add(n)
+            elif 'vis_feat_extractor' in n:
+                vis_feat_extractor_group.append(p)
+                processed_param_names.add(n)
+
         param_groups.append({
             "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)
+        })
+        param_groups.append({
+            "params": vis_preproc_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_preproc_lr_multiplier', 1)
+        })
+        param_groups.append({
+            "params": vis_feat_extractor_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_feat_extractor_lr_multiplier', 1)
         })
 
         if "optim_param_groups" in self.cfg:
