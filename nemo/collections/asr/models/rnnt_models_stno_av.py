@@ -65,7 +65,9 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             self.world_size = trainer.world_size
 
         self.audio_transform = AudioTransform(subset="test")
-        self.video_transform = VideoTransform(subset="test")
+
+        self.train_video_transform = VideoTransform(subset="train")
+        self.test_video_transform = VideoTransform(subset="test")
 
         # VISUAL EMBEDDING EXTRACTION CONFIGS
         self.extract_features_on_the_fly = cfg.get("extract_features_on_the_fly", False)
@@ -106,13 +108,17 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 self.vis_feat_extractor.avsr.encoder.label_embs_concat.requires_grad = False
                 for p in self.vis_feat_extractor.avsr.encoder.feature_extractor_audio.proj.parameters():
                     p.requires_grad = False
-                    
+
                 if self.freeze_visual_encoder:
                     self.vis_feat_extractor.eval()
                     for param in self.vis_feat_extractor.parameters():
                         param.requires_grad = False
                 else:
                     self.vis_feat_extractor.train()
+
+                self.vis_feat_extractor.avsr.encoder.feature_extractor_video.resnet.eval()
+                for p in self.vis_feat_extractor.avsr.encoder.feature_extractor_video.resnet.parameters():
+                    p.requires_grad = False
             else:
                 raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 

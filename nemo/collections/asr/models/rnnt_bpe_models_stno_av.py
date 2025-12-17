@@ -295,7 +295,7 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
                 # preprocessor_cfg=self.cfg.get("preprocessor", None),
                 val=val,
                 audio_transform=self.audio_transform,
-                video_transform=self.video_transform,
+                video_transform=self.test_video_transform if val else self.train_video_transform,
             )
         else:
             dataset = av_to_text_and_stno_dataset.get_audio_to_text_bpe_dataset_from_config(
