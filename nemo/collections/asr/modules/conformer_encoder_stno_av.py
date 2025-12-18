@@ -173,6 +173,9 @@ class VisualConditioningModule(nn.Module):
 
         if visual_conditioning_method == 'add_gate':
             self.gate = nn.Parameter(torch.full((d_model,), -3.0))  # per-channel gate
+        elif visual_conditioning_method == 'add_project':
+            self.proj = nn.Linear(d_model, d_model)
+            self.proj.weight.data = torch.eye(d_model) * 0.02
         elif visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
         elif visual_conditioning_method == 'concat_add_gate':
@@ -212,6 +215,8 @@ class VisualConditioningModule(nn.Module):
 
         if self.visual_conditioning_method == 'add':
             conditioned_audio = audio_signal + visual_embeds
+        elif self.visual_conditioning_method == 'add_project':
+            conditioned_audio = audio_signal + self.proj(visual_embeds)
         elif self.visual_conditioning_method == 'add_gate':
             alpha = torch.sigmoid(self.gate).view(1, 1, -1)
             conditioned_audio = audio_signal + alpha * visual_embeds
