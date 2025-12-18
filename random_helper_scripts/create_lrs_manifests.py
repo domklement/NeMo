@@ -104,6 +104,9 @@ def create_cut_from_video(video_path: Path, base_name: str, dataset_part: str) -
             if len(parts) >= 2:
                 speaker_id = parts[1]
 
+        if speaker_id is None and 'portrait_face' in sample_id:
+            speaker_id = sample_id.split('_portrait_face_')[0]
+
         if speaker_id is None:
             raise ValueError(f"Invalid sample ID format: {sample_id}")
 
