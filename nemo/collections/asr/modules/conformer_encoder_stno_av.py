@@ -121,9 +121,11 @@ class VisualProcessingModule(nn.Module):
 
         # Sometimes, the audio shape can be off-by-one. Fix it by either getting rid of or adding one frame.
         shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1] if audio_signal is not None else 0
-        if shape_diff == 1:
-            downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,1,0,0))
-        elif shape_diff == -1:
+        if abs(shape_diff) > 1:
+            logging.error('Audio and visual embeddings have different time dimensions even after downsampling: {} vs {}.'.format(audio_signal.shape[1], downsampled_visual_embeds.shape[1]))
+        if shape_diff > 0:
+            downsampled_visual_embeds = torch.nn.functional.pad(downsampled_visual_embeds, (0,0,0,shape_diff,0,0))
+        elif shape_diff < 0:
             downsampled_visual_embeds = downsampled_visual_embeds[:, :audio_signal.shape[1], :]
         elif shape_diff == 0:
             pass
