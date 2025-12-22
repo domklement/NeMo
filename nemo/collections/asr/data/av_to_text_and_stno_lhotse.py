@@ -539,7 +539,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         if idx < 0 or idx >= len(self.spk_cut_list):
             raise IndexError("Index out of range")
 
-        utt_id, spk, cut = self.spk_cut_list[idx]
+        utt_id, target_spk, cut = self.spk_cut_list[idx]
         cut = fastcopy(cut)
 
         if isinstance(cut, MonoCut):
@@ -568,7 +568,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     per_spk_videos[t.cut.supervisions[0].speaker] = t.cut.recording.sources[0].source
 
         cut_duration = cut.duration
-        spk_specific_supervisions = list(filter(lambda s: s.speaker == spk, cut.supervisions ))
+        spk_specific_supervisions = list(filter(lambda s: s.speaker == target_spk, cut.supervisions ))
 
         if self.val:
             rand_start = cut.start
@@ -601,7 +601,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         spk_to_id = dict([a[::-1] for a in enumerate(sorted(CutSet.from_cuts([cut]).speakers))])
         all_speakers = spk_to_id.keys()
-        target_spk_id = spk_to_id[spk]
+        target_spk_id = spk_to_id[target_spk]
         # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
         # RETURN AUDIO
@@ -691,7 +691,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     end_idx = int(sup_end * downsampled_freq)
                     spk_activity_mask[spk_to_id[s.speaker], start_idx:end_idx] = 1.
             
-            stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[spk])
+            stno_mask = self._create_stno_masks(spk_activity_mask, spk_to_id[target_spk])
             stno_len = torch.tensor(stno_mask.shape[1], dtype=torch.long)
         else:
             stno_mask = torch.tensor([[]])
@@ -703,9 +703,9 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             
             if self.return_all_spks:
                 # Load visual features for all speakers and stack them
-                all_spk_visual_embeds = [self._get_spk_visual_feats(cut, spk, start_vid_idx, end_vid_idx)]
+                all_spk_visual_embeds = [self._get_spk_visual_feats(cut, target_spk, start_vid_idx, end_vid_idx)]
                 for speaker in sorted(all_speakers):
-                    if speaker == spk:
+                    if speaker == target_spk:
                         continue
                     spk_visual_embeds = self._get_spk_visual_feats(cut, speaker, start_vid_idx, end_vid_idx)
                     all_spk_visual_embeds.append(spk_visual_embeds)
@@ -713,7 +713,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 visual_embeds = torch.stack(all_spk_visual_embeds, dim=1)
             else:
                 # Load only target speaker and add speaker dimension of size 1 at dim=1
-                visual_embeds = self._get_spk_visual_feats(cut, spk, start_vid_idx, end_vid_idx)
+                visual_embeds = self._get_spk_visual_feats(cut, target_spk, start_vid_idx, end_vid_idx)
                 visual_embeds = visual_embeds.unsqueeze(1)  # (T, 1, N, C)
         else:
             visual_embeds = torch.tensor([])
@@ -723,25 +723,26 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             per_spk_videos = self._build_per_spk_vid_paths(cut)
 
             if isinstance(cut, MixedCut):
-                if spk not in per_spk_videos:
-                    raise ValueError(f"Speaker {spk} not found in video paths.")
+                if target_spk not in per_spk_videos:
+                    raise ValueError(f"Speaker {target_spk} not found in video paths.")
                 
                 assert set(per_spk_videos.keys()) == all_speakers, "Mismatch between video paths and speakers in the cut."
 
                 # if self.return_all_spks:
                 # Load all video frames for the track
                 per_spk_tracks = dict([(t.cut.supervisions[0].speaker, t) for t in cut.tracks])
-                track = per_spk_tracks[spk]
+                track = per_spk_tracks[target_spk]
 
                 # Target speaker is always going to be the first one.
                 if self.return_all_spks:
                     all_spk_video_frames = [
                         self._get_transformed_spk_video_from_mixed_cut(
-                            cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx
+                            cut_duration, track, target_spk, per_spk_videos, start_vid_idx, end_vid_idx
                         )[0]
                     ]
+
                     for other_speaker in sorted(all_speakers):
-                        if other_speaker == spk:
+                        if other_speaker == target_spk:
                             continue
                         
                         track = per_spk_tracks[other_speaker]
@@ -752,23 +753,23 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     video_frames = torch.stack(all_spk_video_frames, dim=1)  # (T, S, C, H, W)
                 else:
                     video_frames, zero_frame_idxes = self._get_transformed_spk_video_from_mixed_cut(
-                        cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx
+                        cut_duration, track, target_spk, per_spk_videos, start_vid_idx, end_vid_idx
                     )
-                    video_Frames = video_frames.unsqueeze(1)  # 1 speaker.
+                    video_frames = video_frames.unsqueeze(1)  # 1 speaker.
 
                 zero_frame_idxes = np.array([], dtype=np.int64)  # Not tracking zero frames for all speakers
             else:
-                if spk not in cut.custom[self.video_key]:
-                    raise ValueError(f"Speaker {spk} not found in video paths.")
+                if target_spk not in cut.custom[self.video_key]:
+                    raise ValueError(f"Speaker {target_spk} not found in video paths.")
                 
                 if self.return_all_spks:
                     all_spk_video_frames = [
                         self._get_transformed_spk_video_from_mono_cut(
-                            cut, spk, start_vid_idx, end_vid_idx
+                            cut, target_spk, start_vid_idx, end_vid_idx
                         )[0]
                     ]
                     for other_speaker in sorted(all_speakers):
-                        if other_speaker == spk:
+                        if other_speaker == target_spk:
                             continue
                         
                         spk_video_frames, _ = self._get_transformed_spk_video_from_mono_cut(
@@ -780,7 +781,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     zero_frame_idxes = np.array([], dtype=np.int64)
                 else:
                     video_frames, zero_frame_idxes = self._get_transformed_spk_video_from_mono_cut(
-                        cut, spk, start_vid_idx, end_vid_idx
+                        cut, target_spk, start_vid_idx, end_vid_idx
                     )
 
                     video_frames = video_frames.unsqueeze(1) # 1 speaker.
