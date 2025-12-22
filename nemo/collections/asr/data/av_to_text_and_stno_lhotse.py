@@ -505,8 +505,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         track_duration = track.cut.duration
         
         # Calculate number of frames to pad before and after
-        frames_before = int(track_offset * self.VIDEO_FPS)
-        frames_after = int((total_duration - track_offset - track_duration) * self.VIDEO_FPS)
+        frames_before = int(round(track_offset * self.VIDEO_FPS))
+        frames_after = int(round((total_duration - track_offset - track_duration) * self.VIDEO_FPS))
         
         # Create zero padding frames with same height and width as video_frames
         if len(video_frames) > 0:
