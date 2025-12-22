@@ -178,6 +178,10 @@ class VisualConditioningModule(nn.Module):
         elif visual_conditioning_method == 'add_project':
             self.proj = nn.Linear(d_model, d_model)
             self.proj.weight.data = torch.eye(d_model) * 0.02
+        elif visual_conditioning_method == 'add_project_gate':
+            self.proj = nn.Linear(d_model, d_model)
+            self.proj.weight.data = torch.eye(d_model) * 0.02
+            self.gate_proj = nn.Linear(2 * d_model, d_model)
         elif visual_conditioning_method == 'film':
             self.film_layer = FiLM(d_model)
         elif visual_conditioning_method == 'concat_add_gate':
@@ -219,6 +223,11 @@ class VisualConditioningModule(nn.Module):
             conditioned_audio = audio_signal + visual_embeds
         elif self.visual_conditioning_method == 'add_project':
             conditioned_audio = audio_signal + self.proj(visual_embeds)
+        elif self.visual_conditioning_method == 'add_project_gate':
+            projected_vis = self.proj(visual_embeds)
+            gate_input = torch.cat([audio_signal, projected_vis], dim=-1)
+            alpha = torch.sigmoid(self.gate_proj(gate_input))
+            conditioned_audio = audio_signal + alpha * projected_vis
         elif self.visual_conditioning_method == 'add_gate':
             alpha = torch.sigmoid(self.gate).view(1, 1, -1)
             conditioned_audio = audio_signal + alpha * visual_embeds
@@ -247,7 +256,8 @@ class MultiSpeakerVisualConditioningModule(nn.Module):
         if visual_conditioning_method == 'add':
             self.tgt_proj = nn.Linear(d_model, d_model)
             self.nontgt_proj = nn.Linear(d_model, d_model)
-            self.out_linear = nn.Linear(self.max_num_speakers * d_model, d_model)
+            self.tgt_proj.weight.data = torch.eye(d_model) * 0.02
+            self.nontgt_proj.weight.data = torch.eye(d_model) * 0.001
         else:
             raise ValueError(f'Unknown visual conditioning method for multi-speaker: {self.visual_conditioning_method}')
 
@@ -256,20 +266,32 @@ class MultiSpeakerVisualConditioningModule(nn.Module):
         visual_embeds: (B, T, S, D)
         """
 
-        if self.visual_conditioning_method == 'add':
-            # Project target and non-target embeddings
-            tgt_embeds = self.tgt_proj(visual_embeds[:, :, :1, :])
-            nontgt_embeds = self.nontgt_proj(visual_embeds[:, :, 1:, :])
-            vis_embeds = torch.concat([tgt_embeds, nontgt_embeds], dim=2)
-            vis_embeds = torch.nn.functional.pad(vis_embeds, (0, 0, 0, (self.max_num_speakers - vis_embeds.shape[2])))
-            for i, n in enumerate(num_speakers):
-                vis_embeds[i, :, n:, :] = 0.0  # Zero out embeddings for non-present speakers
-            vis_embeds = self.out_linear(vis_embeds.reshape((*vis_embeds.shape[:2], -1)))  # (B, T, D)
+        if self.visual_conditioning_method == 'add' or self.visual_conditioning_method == 'avg':
+            vis_embeds = self._get_simple_multispk_vis_embeds(visual_embeds, num_speakers)
+
+            if self.visual_conditioning_method == 'avg':
+                vis_embeds = vis_embeds / num_speakers.view(-1, 1, 1).to(vis_embeds.dtype)
+
             conditioned_audio = audio_signal + vis_embeds
         else:
             raise ValueError(f'Unknown visual conditioning method for multi-speaker: {self.visual_conditioning_method}')
         
         return conditioned_audio
+    
+    def _get_simple_multispk_vis_embeds(self, visual_embeds, num_speakers):
+        """
+        visual_embeds: (B, T, S, D)
+        """
+        # Project target and non-target embeddings
+        tgt_embeds = self.tgt_proj(visual_embeds[:, :, :1, :])
+        nontgt_embeds = self.nontgt_proj(visual_embeds[:, :, 1:, :])
+        vis_embeds = torch.concat([tgt_embeds, nontgt_embeds], dim=2)
+        # vis_embeds = torch.nn.functional.pad(vis_embeds, (0, 0, 0, (self.max_num_speakers - vis_embeds.shape[2])))
+        for i, n in enumerate(num_speakers):
+            vis_embeds[i, :, n:, :] = 0.0  # Zero out embeddings for non-present speakers
+        vis_embeds = vis_embeds.sum(dim=2)
+
+        return vis_embeds
 
 
 class VisionAdapterEncoder(nn.Module):
@@ -834,6 +856,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             stno_mask = None
 
         if not self.multi_speaker_visual_conditioning and len(visual_embeds.shape) == 5:
+            assert visual_embeds.shape[2] == 1, "If multi_speaker_visual_conditioning is False, visual_embeds.shape[2] must be 1."
             # Squeeze the speaker dimension if not using multi-speaker visual conditioning
             visual_embeds = visual_embeds.squeeze(dim=2)  # (B, T, C, D)
 

@@ -819,20 +819,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             num_speakers=num_speakers,
         )
         return encoded, encoded_len
-
-    # def avhubert_get_visual_feats(self, video_frames, video_lengths):
-    #     # avhubert_audio_feats = torch.stack([self.audio_transform(signal[i].cpu()) for i in range(len(signal))], 
-    #     #                                    dim=0).to(signal.device)
-    #     avhubert_video_frames = video_frames
-    #     attn_mask = make_non_pad_mask(video_lengths).to(video_frames.device)
-    #     av_feats = self.vis_feat_extractor.avsr.encoder(
-    #         input_features=None,
-    #         video=avhubert_video_frames.permute(0, 2, 1, 3, 4),
-    #         attention_mask=attn_mask,
-    #     ).last_hidden_state.unsqueeze(2)
-    #     return av_feats
     
-    def get_visual_feats(self, video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched: bool = True):
+    def get_visual_feats(self, video_frames, video_lengths, num_speakers, inference_mode='chunk', chunk_length=10, batched: bool = True):
         if self.visual_encoder_type != 'avhubert':
             raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 
@@ -841,10 +829,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             # return self.avhubert_get_visual_feats(signal, signal_len, video_frames, video_lengths)
             raise NotImplementedError("Non-chunked visual feature extraction is not implemented yet.")
 
-        # video_frames expected shape: (B, T, C, H, W)
+        # video_frames expected shape: (B, T, S, C, H, W)
         # video_lengths expected shape: (B,)
         B = video_frames.shape[0]
         T = video_frames.shape[1]
+        S = video_frames.shape[2]
         fps = 25
         chunk_frames = max(1, int(chunk_length * fps))
 
@@ -853,6 +842,15 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         device = video_frames.device
         lengths = video_lengths.to(device)
+        
+        # We need to expand the batch sequence by valid speakers.
+        num_speakers_prefix = [0] + torch.cumsum(num_speakers, dim=0).cpu().tolist()
+        batched_spks_video_frames = torch.concat([video_frames[b, :, :s, ...].transpose(0,1) for b, s in enumerate(num_speakers)], dim=0)
+
+        B_orig = B
+        B = batched_spks_video_frames.shape[0]
+        video_frames = batched_spks_video_frames  # (B, T, C, H, W)
+        lengths = lengths.repeat_interleave(num_speakers, dim=0)  # (B,)
 
         if batched:
             # Pad time dimension to multiple of chunk_frames so we can batch all chunks
@@ -899,8 +897,17 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             av_feats = av_feats[:, :T, :]
 
             # Lately, to support all the speakers, we need to have visual features of shape (B, T, S, C, D)
-            return av_feats.unsqueeze(2).unsqueeze(2)
+            # C - # of AVH layers.
+            max_speakers = max(num_speakers).max().item()
+            # We need to pad back to the original batch size and speaker dimensions.
+            return torch.stack([
+                torch.nn.functional.pad(av_feats[num_speakers_prefix[i]:num_speakers_prefix[i+1]], 
+                                        (0, 0, 0, 0, 0, max_speakers-num_speakers[i])) 
+                for i in range(len(num_speakers))
+            ], dim=0).permute(0, 2, 1, 3).unsqueeze(3)
+            # return av_feats.unsqueeze(2).unsqueeze(2)
         else:
+            assert NotImplementedError("Non-batched chunked visual feature extraction is not fully implemented yet.")
             # Process chunks one-by-one (batched across samples) to avoid global padding.
             chunk_outputs = []
             for k in range(n_chunks):
@@ -967,13 +974,17 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             sample_id = None
 
         if self.extract_features_on_the_fly:
-            av_feats = self.get_visual_feats(video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            # video_frames: BxTxSxCxHxW
+            # B - Batch, T - time, S - speakers, C - channels (1), H - height, W - width
+            av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+
+            # Shape: (B, T, S, C, D)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
             if self.replace_zero_video_frames_with_zero_embeds:
+                assert NotImplementedError("Replacing zero video frames with zero embeddings is not implemented for multiple-speaker OTF inference.")
                 for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
                     visual_embeds[i, zfi[:zfi_len], ...] = 0.0
-
 
         if self.use_audio_encoder:
             # forward() only performs encoder forwardf

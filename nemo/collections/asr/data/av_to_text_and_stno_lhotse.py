@@ -101,6 +101,9 @@ def _speech_collate_fn(batch, pad_id):
         sample_ids = None
     else:
         raise ValueError(f"Expects 15 or 16 tensors in the batch, got {len(packed_batch)}!")
+    
+    # Get max number of speakers for padding
+    max_num_speakers = max(num_speakers).item()
 
     max_audio_len = 0
     has_audio = audio_lengths[0] is not None
@@ -115,8 +118,6 @@ def _speech_collate_fn(batch, pad_id):
     has_visual_embed = visual_embed_lengths[0] is not None
     if has_visual_embed:
         max_visual_embed_len = max(visual_embed_lengths).item()
-        # Also get max number of speakers for padding
-        max_num_speakers = max(num_speakers).item()
     has_video = video_frame_lengths[0] is not None
     if has_video:
         max_video_frame_len = max(video_frame_lengths).item()
@@ -168,11 +169,17 @@ def _speech_collate_fn(batch, pad_id):
         
         # We don't have to normalize the empty videos. If one of them is empty, all of the videos will be empty due to the way the dataset is written.
         if has_video:
-            # video_frames_i is expected shape (T, H, W, C) or empty tensor
+            # video_frames_i is expected shape (Time, Speakers, Channels, Height, Width) or empty tensor
             video_len = video_frames_i_len.item()
             if video_len < max_video_frame_len:
-                pad = (0, 0, 0, 0, 0, 0, 0, max_video_frame_len - video_len)
+                pad = (0, 0, 0, 0, 0, 0, 0, 0, 0, max_video_frame_len - video_len)
                 video_frames_i = torch.nn.functional.pad(video_frames_i, pad)
+            
+            current_num_speakers = video_frames_i.shape[1] if video_frames_i.numel() > 0 else 0
+            if current_num_speakers < max_num_speakers and video_frames_i.numel() > 0:
+                pad = (0, 0, 0, 0, 0, 0, 0, max_num_speakers - current_num_speakers, 0, 0)
+                video_frames_i = torch.nn.functional.pad(video_frames_i, pad)
+
             video_frames_list.append(video_frames_i)
 
         if has_zero_frame_idxes:
@@ -180,6 +187,7 @@ def _speech_collate_fn(batch, pad_id):
             if zero_frame_idxes_len < max_zero_frame_idxes_len:
                 pad = (0, max_zero_frame_idxes_len - zero_frame_idxes_len)
                 zero_frame_idxes_i = torch.nn.functional.pad(zero_frame_idxes_i, pad, value=-1)
+
             zero_frame_idxes_list.append(zero_frame_idxes_i)
 
     if has_audio:
@@ -312,7 +320,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             'speaker_id': NeuralType(tuple('B'), VoidType()),
             'visual_embeds': NeuralType(('B', 'T', 'S', 'N', 'C'), AudioSignal()),
             'visual_embeds_length': NeuralType(tuple('B'), LengthsType()),
-            'video_frames': NeuralType(('B', 'T', 'H', 'W', 'C'), AudioSignal()),
+            'video_frames': NeuralType(('B', 'T', 'S', 'C', 'H', 'W'), AudioSignal()),
             'video_frames_length': NeuralType(tuple('B'), LengthsType()),
             'zero_frame_idxes': NeuralType(('B','T'), LengthsType()),
             'zero_frame_idxes_length': NeuralType(tuple('B'), LengthsType()),
@@ -541,7 +549,18 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             for t in cut.tracks:
                 if t.cut.has_video and abs(t.cut.video.fps - self.VIDEO_FPS) > 1e-2:
                     raise ValueError(f"Cut video fps {t.cut.video.fps} does not match dataset fps {self.VIDEO_FPS}")
-            
+                
+            # We need to check if the tracks have unique speakers.
+            # This assumption is later used when retrieving per-speaker videos or embeddings.
+            spks = set()
+            for t in cut.tracks:
+                cut_spks = CutSet.from_cuts([t.cut]).speakers
+                for spk in cut_spks:
+                    if spk in spks:
+                        raise ValueError(f"Speaker {spk} appears in multiple tracks of the same MixedCut {cut.id}, which is not supported.")
+                    
+                    spks.add(spk)
+
             # We need to build the per_spk video dict.
             per_spk_videos = dict()
             for t in cut.tracks:
@@ -585,6 +604,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         target_spk_id = spk_to_id[spk]
         # spk_activity_mask = cut.speakers_audio_mask(speaker_to_idx_map=spk_to_id)[:, start_sample:end_sample]
 
+        # RETURN AUDIO
         if self.return_audio:
             if isinstance(cut, MonoCut):
                 recording_source = self._replace_path(cut.recording.sources[0].source)
@@ -697,42 +717,77 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 visual_embeds = visual_embeds.unsqueeze(1)  # (T, 1, N, C)
         else:
             visual_embeds = torch.tensor([])
-    
+
         # VIDEO FRAMES LOADING
         if self.return_video and self.video_key is not None:
             per_spk_videos = self._build_per_spk_vid_paths(cut)
+
             if isinstance(cut, MixedCut):
                 if spk not in per_spk_videos:
                     raise ValueError(f"Speaker {spk} not found in video paths.")
                 
+                assert set(per_spk_videos.keys()) == all_speakers, "Mismatch between video paths and speakers in the cut."
+
+                # if self.return_all_spks:
                 # Load all video frames for the track
                 per_spk_tracks = dict([(t.cut.supervisions[0].speaker, t) for t in cut.tracks])
                 track = per_spk_tracks[spk]
-                
-                vid_dec = VideoDecoder(self._replace_path(per_spk_videos[spk]), dimension_order="NHWC")
-                video_frames = vid_dec[:]  # Load all frames without indexing
-                video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
-                
-                # Pad video frames based on track offset and total cut duration
-                video_frames = self._pad_video_frames_for_track(video_frames, track, cut_duration)
-                
-                # Now extract the relevant segment from the padded video
-                video_frames = video_frames[start_vid_idx:end_vid_idx]
-                zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+
+                # Target speaker is always going to be the first one.
+                if self.return_all_spks:
+                    all_spk_video_frames = [
+                        self._get_transformed_spk_video_from_mixed_cut(
+                            cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx
+                        )[0]
+                    ]
+                    for other_speaker in sorted(all_speakers):
+                        if other_speaker == spk:
+                            continue
+                        
+                        track = per_spk_tracks[other_speaker]
+                        spk_video_frames, _ = self._get_transformed_spk_video_from_mixed_cut(
+                            cut_duration, track, other_speaker, per_spk_videos, start_vid_idx, end_vid_idx
+                        )
+                        all_spk_video_frames.append(spk_video_frames)
+                    video_frames = torch.stack(all_spk_video_frames, dim=1)  # (T, S, C, H, W)
+                else:
+                    video_frames, zero_frame_idxes = self._get_transformed_spk_video_from_mixed_cut(
+                        cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx
+                    )
+                    video_Frames = video_frames.unsqueeze(1)  # 1 speaker.
+
+                zero_frame_idxes = np.array([], dtype=np.int64)  # Not tracking zero frames for all speakers
             else:
                 if spk not in cut.custom[self.video_key]:
                     raise ValueError(f"Speaker {spk} not found in video paths.")
-                vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
-                video_frames = vid_dec[start_vid_idx:end_vid_idx]
-                video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
-                zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+                
+                if self.return_all_spks:
+                    all_spk_video_frames = [
+                        self._get_transformed_spk_video_from_mono_cut(
+                            cut, spk, start_vid_idx, end_vid_idx
+                        )[0]
+                    ]
+                    for other_speaker in sorted(all_speakers):
+                        if other_speaker == spk:
+                            continue
+                        
+                        spk_video_frames, _ = self._get_transformed_spk_video_from_mono_cut(
+                            cut, other_speaker, start_vid_idx, end_vid_idx
+                        )
+                        all_spk_video_frames.append(spk_video_frames)
 
-            if self.video_transform is not None:
-                video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
+                    video_frames = torch.stack(all_spk_video_frames, dim=1)  # (T, S, C, H, W)
+                    zero_frame_idxes = np.array([], dtype=np.int64)
+                else:
+                    video_frames, zero_frame_idxes = self._get_transformed_spk_video_from_mono_cut(
+                        cut, spk, start_vid_idx, end_vid_idx
+                    )
+
+                    video_frames = video_frames.unsqueeze(1) # 1 speaker.
         else:
             video_frames = torch.tensor([])
             zero_frame_idxes = np.array([], dtype=np.int64)
-        
+
         return (
             audio_data, 
             audio_data_len, 
@@ -751,6 +806,34 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             torch.tensor(len(all_speakers), dtype=torch.long) if self.return_all_spks else torch.tensor(1, dtype=torch.long),
         )
     
+    def _get_transformed_spk_video_from_mono_cut(self, cut, spk, start_vid_idx, end_vid_idx) -> torch.Tensor:
+        vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
+        video_frames = vid_dec[start_vid_idx:end_vid_idx]
+        video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+        zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+
+        if self.video_transform is not None:
+            video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
+
+        return video_frames, zero_frame_idxes
+    
+    def _get_transformed_spk_video_from_mixed_cut(self, cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx) -> torch.Tensor:
+        vid_dec = VideoDecoder(self._replace_path(per_spk_videos[spk]), dimension_order="NHWC")
+        video_frames = vid_dec[:]  # Load all frames without indexing
+        video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
+        
+        # Pad video frames based on track offset and total cut duration
+        video_frames = self._pad_video_frames_for_track(video_frames, track, cut_duration)
+        
+        # Now extract the relevant segment from the padded video
+        video_frames = video_frames[start_vid_idx:end_vid_idx]
+        zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+
+        if self.video_transform is not None:
+            video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
+
+        return video_frames, zero_frame_idxes
+    
     def _build_per_spk_vid_paths(self, cut):
         if isinstance(cut, MixedCut):
             per_spk_videos = dict()
@@ -759,6 +842,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 if self.video_key in t_cut.custom:
                     per_spk_videos.update(t_cut.custom[self.video_key])
                 else:
+                    logging.warning(f"Video key {self.video_key} not found in track cut custom for cut {t_cut.id}. Using recording source instead.")
                     per_spk_videos[t_cut.supervisions[0].speaker] = t_cut.recording.sources[0].source
         else:
             per_spk_videos = cut.custom.get(self.video_key, dict())
