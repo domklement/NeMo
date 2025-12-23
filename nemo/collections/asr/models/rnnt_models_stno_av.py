@@ -71,6 +71,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
         # VISUAL EMBEDDING EXTRACTION CONFIGS
         self.extract_features_on_the_fly = cfg.get("extract_features_on_the_fly", False)
+        self.extract_visual_features_all_layers = cfg.get("extract_visual_features_all_layers", False)
         self.visual_encoder_type = cfg.get("visual_encoder_type", None)
         self.visual_encoder_ckpt_path = cfg.get("visual_encoder_ckpt_path", None)
         self.freeze_visual_encoder = cfg.get("freeze_visual_encoder", False)
@@ -885,26 +886,43 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             video_chunks_perm = video_chunks.permute(0, 2, 1, 3, 4)
 
             # run encoder on chunk-batch and recombine
-            av_feats_chunks = self.vis_feat_extractor.avsr.encoder(
+            encoder_out = self.vis_feat_extractor.avsr.encoder(
                 input_features=None, video=video_chunks_perm, attention_mask=attn_mask
-            ).last_hidden_state
+            )
 
-            # av_feats_chunks: (B*n_chunks, chunk_frames, D) -> reshape to (B, pad_len, D)
-            D = av_feats_chunks.shape[-1]
-            av_feats = av_feats_chunks.view(B, n_chunks * chunk_frames, D)
+            # Prepare av_feats with layer dimension early for simpler downstream handling
+            if getattr(self, 'extract_visual_features_all_layers', False):
+                hidden_states = encoder_out.hidden_states
+                # Combine per-layer chunked outputs to (B, T, C, D)
+                layer_feats = []
+                for hs in hidden_states:
+                    D = hs.shape[-1]
+                    hs_reshaped = hs.view(B, n_chunks * chunk_frames, D)
+                    hs_reshaped = hs_reshaped[:, :T, :]
+                    layer_feats.append(hs_reshaped)  # (B, T, D)
+                # Stack along new layer dimension C
+                av_feats = torch.stack(layer_feats, dim=2)  # (B, T, C, D)
+            else:
+                # Use only the last hidden state, but add a singleton layer dim (C=1)
+                av_feats_chunks = encoder_out.last_hidden_state
+                D = av_feats_chunks.shape[-1]
+                av_feats = av_feats_chunks.view(B, n_chunks * chunk_frames, D)
+                av_feats = av_feats[:, :T, :]
+                av_feats = av_feats.unsqueeze(2)  # (B, T, 1, D)
 
-            # crop to original T (remove last-chunk padding) and return (B, T, 1, D)
-            av_feats = av_feats[:, :T, :]
+            # Restore original batch with speaker dimension and pad to max speakers
+            max_speakers = int(num_speakers.max().item())
+            per_batch = []
+            for i in range(len(num_speakers)):
+                s_i = int(num_speakers[i].item())
+                cur = av_feats[num_speakers_prefix[i]:num_speakers_prefix[i + 1]]  # (S_i, T, C, D)
+                if max_speakers - s_i > 0:
+                    pad = av_feats.new_zeros((max_speakers - s_i, T, av_feats.shape[2], av_feats.shape[3]))
+                    cur = torch.cat([cur, pad], dim=0)
+                per_batch.append(cur)
 
-            # Lately, to support all the speakers, we need to have visual features of shape (B, T, S, C, D)
-            # C - # of AVH layers.
-            max_speakers = max(num_speakers).max().item()
-            # We need to pad back to the original batch size and speaker dimensions.
-            return torch.stack([
-                torch.nn.functional.pad(av_feats[num_speakers_prefix[i]:num_speakers_prefix[i+1]], 
-                                        (0, 0, 0, 0, 0, max_speakers-num_speakers[i])) 
-                for i in range(len(num_speakers))
-            ], dim=0).permute(0, 2, 1, 3).unsqueeze(3)
+            # (B_orig, S, T, C, D) -> (B_orig, T, S, C, D)
+            return torch.stack(per_batch, dim=0).permute(0, 2, 1, 3, 4)
             # return av_feats.unsqueeze(2).unsqueeze(2)
         else:
             assert NotImplementedError("Non-batched chunked visual feature extraction is not fully implemented yet.")

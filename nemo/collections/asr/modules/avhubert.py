@@ -1087,7 +1087,7 @@ class AVHubertModel(PreTrainedModel):
         # padding_mask: (B, T), bool
         # mask_indices: (B, T), bool
         
-        x = self.encoder(x, attention_mask=padding_mask)[0]
+        x = self.encoder(x, attention_mask=padding_mask, output_hidden_states=True)
         # x = self.encoder(
         #     x,
         #     # attention_mask=padding_mask,
@@ -1131,8 +1131,9 @@ class AVHubertModel(PreTrainedModel):
             features_only=True,
             output_layer=None,
         )
-        feature = res["x"]
-        return BaseModelOutput(last_hidden_state=feature, hidden_states=None, attentions=None)
+        return res["x"]
+        # feature = res["x"]
+        # return BaseModelOutput(last_hidden_state=feature, hidden_states=None, attentions=None)
 
     def extract_features(
         self,

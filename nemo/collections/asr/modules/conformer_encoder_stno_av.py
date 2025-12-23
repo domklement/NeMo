@@ -96,7 +96,7 @@ class VisualProcessingModule(nn.Module):
                                               padding=4)
 
         # Embedding aggregation parameters
-        if conditioning_embed_aggr_method == 'wavg':
+        if conditioning_embed_aggr_method in {'wavg', 'softmax_wavg'}:
             self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds) / self.num_conditioning_embeds)
 
     def forward(self, visual_embeds, audio_signal=None):
@@ -110,6 +110,9 @@ class VisualProcessingModule(nn.Module):
         elif self.conditioning_embed_aggr_method == 'wavg':
             weights = torch.exp(self.log_weights)
             visual_embeds = (visual_embeds * weights.view(1, 1, -1, 1)).sum(dim=2) / weights.sum()  # (B, T, D)
+        elif self.conditioning_embed_aggr_method == 'softmax_wavg':
+            weights = torch.softmax(self.log_weights, dim=0)
+            visual_embeds = (visual_embeds * weights.view(1, 1, -1, 1)).sum(dim=2)  # (B, T, D)
         else:
             raise ValueError(f'Unknown conditioning_embed_aggr_method: {self.conditioning_embed_aggr_method}')
 
