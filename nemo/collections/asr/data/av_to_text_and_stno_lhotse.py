@@ -750,6 +750,11 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                             cut_duration, track, other_speaker, per_spk_videos, start_vid_idx, end_vid_idx
                         )
                         all_spk_video_frames.append(spk_video_frames)
+                    max_len = max([vf.shape[0] for vf in all_spk_video_frames])
+                    min_len = min([vf.shape[0] for vf in all_spk_video_frames])
+                    if max_len - min_len > 10:
+                        logging.warning(f"Significant video length mismatch among speakers in cut {cut.id}: max len {max_len}, min len {min_len}")
+                    all_spk_video_frames = [vf[:min_len] for vf in all_spk_video_frames]
                     video_frames = torch.stack(all_spk_video_frames, dim=1)  # (T, S, C, H, W)
                 else:
                     video_frames, zero_frame_idxes = self._get_transformed_spk_video_from_mixed_cut(
@@ -777,6 +782,11 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                         )
                         all_spk_video_frames.append(spk_video_frames)
 
+                    max_len = max([vf.shape[0] for vf in all_spk_video_frames])
+                    min_len = min([vf.shape[0] for vf in all_spk_video_frames])
+                    if max_len - min_len > 10:
+                        logging.warning(f"Significant video length mismatch among speakers in cut {cut.id}: max len {max_len}, min len {min_len}")
+                    all_spk_video_frames = [vf[:min_len] for vf in all_spk_video_frames]
                     video_frames = torch.stack(all_spk_video_frames, dim=1)  # (T, S, C, H, W)
                     zero_frame_idxes = np.array([], dtype=np.int64)
                 else:

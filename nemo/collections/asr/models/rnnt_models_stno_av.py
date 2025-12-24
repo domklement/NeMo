@@ -1136,7 +1136,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         assert len(signal) == 1
 
         if self.extract_features_on_the_fly:
-            av_feats = self.get_visual_feats(video_frames, video_lengths, inference_mode='chunk', chunk_length=10, batched=True)
+            av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
             visual_embeds = av_feats
             visual_embed_lengths = video_lengths
             if self.replace_zero_video_frames_with_zero_embeds:

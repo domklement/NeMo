@@ -256,7 +256,7 @@ class MultiSpeakerVisualConditioningModule(nn.Module):
         self.modality_dropout_prob = modality_dropout_prob
         self.max_num_speakers = max_num_speakers
 
-        if visual_conditioning_method == 'add':
+        if visual_conditioning_method in {'add', 'avg'}:
             self.tgt_proj = nn.Linear(d_model, d_model)
             self.nontgt_proj = nn.Linear(d_model, d_model)
             self.tgt_proj.weight.data = torch.eye(d_model) * 0.02
