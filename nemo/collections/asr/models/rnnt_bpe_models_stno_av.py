@@ -284,6 +284,14 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
         This is not a proper use of Lhotse datasets. We're just using manifests within our own custom dataset class.
         """
         if config.get("use_lhotse"):
+            venc_type = self.cfg.get("visual_encoder_type")
+            if venc_type == 'avhubert':
+                video_transform_type = 'avhubert'
+            elif venc_type.startswith('dinov3'):
+                video_transform_type = 'dinov3'
+            else:
+                raise ValueError(f"Unsupported visual encoder type: {venc_type}")
+
             dataset = get_av_to_text_and_stno_lhotse_dataset(
                 config,
                 tokenizer=self.tokenizer,
@@ -296,6 +304,7 @@ class EncDecRNNTBPEModelSTNOAV(EncDecRNNTModelSTNOAV, ASRBPEMixin):
                 val=val,
                 audio_transform=self.audio_transform,
                 video_transform=self.test_video_transform if val else self.train_video_transform,
+                video_transform_type=video_transform_type,
             )
         else:
             dataset = av_to_text_and_stno_dataset.get_audio_to_text_bpe_dataset_from_config(

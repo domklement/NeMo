@@ -46,6 +46,7 @@ def get_av_to_text_and_stno_lhotse_dataset(
     shuffle: bool = True,
     audio_transform: Optional[callable] = None,
     video_transform: Optional[callable] = None,
+    video_transform_type: Optional[str] = None,
     **kwargs: Any,
 ) -> Union[LhotseAVToBPEAndSTNODataset, ConcatDataset, CodeSwitchedDataset]:
     return LhotseAVToBPEAndSTNODataset(
@@ -69,5 +70,6 @@ def get_av_to_text_and_stno_lhotse_dataset(
         return_all_spks=cfg.get("return_all_spks", False),
         audio_transform=audio_transform,
         video_transform=video_transform,
+        video_transform_type=video_transform_type,
         **kwargs,
     )

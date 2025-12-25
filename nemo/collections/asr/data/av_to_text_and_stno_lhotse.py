@@ -351,6 +351,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         return_stno: bool = True,
         return_visual_features: bool = True,
         return_video: bool = False,
+        video_transform_type: str = 'avhubert', # avhubert | dinov3
         visual_features_key: Optional[str] = 'av_hubert_lip_features',
         video_key: Optional[str] = 'per_spk_lip_crop_videos',
         use_asd_for_stno: bool = False,
@@ -417,6 +418,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.return_stno = return_stno
         self.return_visual_features = return_visual_features
         self.return_video = return_video
+        self.video_transform_type = video_transform_type
         self.visual_features_key = visual_features_key
         self.video_key = video_key
         self.use_asd_for_stno = use_asd_for_stno
@@ -502,12 +504,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         Pad video frames before and after based on track offset and duration.
         
         Args:
-            video_frames: Video frames array with shape (T, H, W)
+            video_frames: Video frames array with shape (T, C, H, W)
             track: The track object containing offset information
             total_duration: Total duration of the mixed cut
             
         Returns:
-            Padded video frames with shape (T_padded, H, W)
+            Padded video frames with shape (T_padded, C, H, W)
         """
         track_offset = track.offset
         track_duration = track.cut.duration
@@ -518,9 +520,9 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         
         # Create zero padding frames with same height and width as video_frames
         if len(video_frames) > 0:
-            h, w = video_frames.shape[1], video_frames.shape[2]
-            pad_before = np.zeros((frames_before, h, w), dtype=video_frames.dtype)
-            pad_after = np.zeros((frames_after, h, w), dtype=video_frames.dtype)
+            c, h, w = video_frames.shape[1], video_frames.shape[2], video_frames.shape[3]
+            pad_before = np.zeros((frames_before, c, h, w), dtype=video_frames.dtype)
+            pad_after = np.zeros((frames_after, c, h, w), dtype=video_frames.dtype)
             padded_frames = np.concatenate([pad_before, video_frames, pad_after], axis=0)
         else:
             # If video_frames is empty, create all zero frames
@@ -812,36 +814,40 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             torch.tensor(len(visual_embeds), dtype=torch.long),
             video_frames,
             torch.tensor(len(video_frames), dtype=torch.long),
-            torch.from_numpy(zero_frame_idxes).long(),
+            torch.from_numpy(zero_frame_idxes).long() if type(zero_frame_idxes) is np.ndarray else zero_frame_idxes,
             torch.tensor(len(zero_frame_idxes), dtype=torch.long),
             torch.tensor(len(all_speakers), dtype=torch.long) if self.return_all_spks else torch.tensor(1, dtype=torch.long),
         )
     
     def _get_transformed_spk_video_from_mono_cut(self, cut, spk, start_vid_idx, end_vid_idx) -> torch.Tensor:
-        vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NHWC")
+        vid_dec = VideoDecoder(self._replace_path(cut.custom[self.video_key][spk]), dimension_order="NCHW")
         video_frames = vid_dec[start_vid_idx:end_vid_idx]
-        video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
-        zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+        zero_frame_idxes = (video_frames == 0).all(dim=(1,2,3)).nonzero(as_tuple=True)[0]
 
-        if self.video_transform is not None:
-            video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
+        if self.video_transform_type == 'avhubert':
+            video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.permute(0, 2, 3, 1).numpy()])
+            video_frames = self.video_transform(torch.from_numpy(video_frames)).unsqueeze(1)  # Add channel dim
+        elif self.video_transform_type == 'dinov3':
+            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values']
 
         return video_frames, zero_frame_idxes
     
     def _get_transformed_spk_video_from_mixed_cut(self, cut_duration, track, spk, per_spk_videos, start_vid_idx, end_vid_idx) -> torch.Tensor:
-        vid_dec = VideoDecoder(self._replace_path(per_spk_videos[spk]), dimension_order="NHWC")
+        vid_dec = VideoDecoder(self._replace_path(per_spk_videos[spk]), dimension_order="NCHW")
         video_frames = vid_dec[:]  # Load all frames without indexing
-        video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.numpy()])
         
         # Pad video frames based on track offset and total cut duration
         video_frames = self._pad_video_frames_for_track(video_frames, track, cut_duration)
         
         # Now extract the relevant segment from the padded video
         video_frames = video_frames[start_vid_idx:end_vid_idx]
-        zero_frame_idxes = np.where(video_frames.reshape(video_frames.shape[0], -1).sum(-1) == 0)[0]
+        zero_frame_idxes = (video_frames == 0).all(dim=(1,2,3)).nonzero(as_tuple=True)[0]
 
-        if self.video_transform is not None:
+        if self.video_transform_type == 'avhubert':
+            video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.permute(0, 2, 3, 1).numpy()])
             video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
+        elif self.video_transform_type == 'dinov3':
+            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values']
 
         return video_frames, zero_frame_idxes
     

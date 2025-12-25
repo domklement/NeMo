@@ -32,6 +32,7 @@ from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.modules.rnnt import RNNTDecoderJoint
 from nemo.collections.asr.modules.avhubert import AVHubertAVSR, make_non_pad_mask
+from nemo.collections.asr.modules.dinov3 import DINOv3VRSEncoder
 from nemo.collections.asr.data.av_data_utils import AudioTransform, VideoTransform
 from nemo.collections.asr.parts.mixins import (
     ASRModuleMixin,
@@ -64,11 +65,6 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if trainer is not None:
             self.world_size = trainer.world_size
 
-        self.audio_transform = AudioTransform(subset="test")
-
-        self.train_video_transform = VideoTransform(subset="train")
-        self.test_video_transform = VideoTransform(subset="test")
-
         # VISUAL EMBEDDING EXTRACTION CONFIGS
         self.extract_features_on_the_fly = cfg.get("extract_features_on_the_fly", False)
         self.extract_visual_features_all_layers = cfg.get("extract_visual_features_all_layers", False)
@@ -91,6 +87,18 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 cfg.train_ds.return_video = True
             if hasattr(cfg.validation_ds, 'return_video'):
                 cfg.validation_ds.return_video = True
+
+
+        self.audio_transform = AudioTransform(subset="test")
+
+        if self.visual_encoder_type == 'avhubert':
+            self.train_video_transform = VideoTransform(subset="train")
+            self.test_video_transform = VideoTransform(subset="test")
+        elif self.visual_encoder_type.startswith('dinov3'):
+            self.train_video_transform = DINOv3VRSEncoder.get_image_processor(self.visual_encoder_type)
+            self.test_video_transform = DINOv3VRSEncoder.get_image_processor(self.visual_encoder_type)
+        else:
+            raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -119,6 +127,18 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
 
                 self.vis_feat_extractor.avsr.encoder.feature_extractor_video.resnet.eval()
                 for p in self.vis_feat_extractor.avsr.encoder.feature_extractor_video.resnet.parameters():
+                    p.requires_grad = False
+
+            elif self.visual_encoder_type.startswith('dinov3'):
+                self.vis_feat_extractor = DINOv3VRSEncoder(model_name=self.visual_encoder_type)
+                if self.freeze_visual_encoder:
+                    self.vis_feat_extractor.eval()
+                    for param in self.vis_feat_extractor.parameters():
+                        param.requires_grad = False
+                else:
+                    self.vis_feat_extractor.train()
+
+                for p in self.vis_feat_extractor.dino_model.parameters():
                     p.requires_grad = False
             else:
                 raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
@@ -822,8 +842,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         return encoded, encoded_len
     
     def get_visual_feats(self, video_frames, video_lengths, num_speakers, inference_mode='chunk', chunk_length=10, batched: bool = True):
-        if self.visual_encoder_type != 'avhubert':
-            raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
+        # if self.visual_encoder_type != 'avhubert':
+        #     raise ValueError(f"Unsupported visual_encoder_type: {self.visual_encoder_type}")
 
         # If not chunking, defer to single-call implementation
         if inference_mode != 'chunk' or chunk_length is None:
@@ -886,9 +906,16 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             video_chunks_perm = video_chunks.permute(0, 2, 1, 3, 4)
 
             # run encoder on chunk-batch and recombine
-            encoder_out = self.vis_feat_extractor.avsr.encoder(
-                input_features=None, video=video_chunks_perm, attention_mask=attn_mask
-            )
+            if self.visual_encoder_type == 'avhubert':
+                encoder_out = self.vis_feat_extractor.avsr.encoder(
+                    input_features=None, video=video_chunks_perm, attention_mask=attn_mask
+                )
+            elif self.visual_encoder_type.startswith('dinov3'):
+                encoder_out = self.vis_feat_extractor(
+                    video_frames=video_chunks_perm, 
+                    video_lengths=chunk_lengths,
+                    attention_mask=attn_mask
+                )
 
             # Prepare av_feats with layer dimension early for simpler downstream handling
             if getattr(self, 'extract_visual_features_all_layers', False):
@@ -1106,6 +1133,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         # Preserve batch acoustic model T and language model U parameters if normalizing
         if self._optim_normalize_joint_txu:
             self._optim_normalize_txu = [encoded_len.max(), transcript_len.max()]
+
+        print(loss_value)
 
         return {'loss': loss_value}
 
