@@ -21,8 +21,8 @@ class DINOv3VRSEncoder(torch.nn.Module):
         super().__init__()
         self.dino_model = AutoModel.from_pretrained(
             f"facebook/{model_name}",
-            dtype=torch.bfloat16,
-            device_map="auto",
+            # dtype=torch.bfloat16,
+            # device_map=self.device,
         )
         self.freeze_dino = freeze_dino
         self.dino_batch_size = dino_batch_size
@@ -34,6 +34,7 @@ class DINOv3VRSEncoder(torch.nn.Module):
             self.num_patches += self.dino_model.config.num_register_tokens
 
         if self.freeze_dino:
+            self.dino_model.eval()
             for param in self.dino_model.parameters():
                 param.requires_grad = False
 

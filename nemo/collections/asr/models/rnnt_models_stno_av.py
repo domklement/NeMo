@@ -1134,8 +1134,6 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if self._optim_normalize_joint_txu:
             self._optim_normalize_txu = [encoded_len.max(), transcript_len.max()]
 
-        print(loss_value)
-
         return {'loss': loss_value}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):

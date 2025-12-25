@@ -828,7 +828,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.permute(0, 2, 3, 1).numpy()])
             video_frames = self.video_transform(torch.from_numpy(video_frames)).unsqueeze(1)  # Add channel dim
         elif self.video_transform_type == 'dinov3':
-            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values']
+            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values'].to('cpu')
 
         return video_frames, zero_frame_idxes
     
@@ -847,7 +847,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.permute(0, 2, 3, 1).numpy()])
             video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1)) # Add channel dim
         elif self.video_transform_type == 'dinov3':
-            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values']
+            video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values'].to('cpu')
 
         return video_frames, zero_frame_idxes
     
