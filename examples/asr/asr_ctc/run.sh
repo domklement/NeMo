@@ -6,8 +6,8 @@ export WANDB_MODE="online"
 python ~/NeMo/examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \
     --config-name="fast-conformer_ctc_bpe.yaml" \
-    model.train_ds.manifest_filepath=/tmp/librispeech/train_clean_5.json \
-    model.validation_ds.manifest_filepath=/tmp/librispeech/dev_clean_2.json \
+    model.train_ds.manifest_filepath=/tmp/librispeech/train.json \
+    model.validation_ds.manifest_filepath=/tmp/librispeech/dev.json \
     model.tokenizer.dir=/home/jovyan/NeMo/tokenizers/ls960/tokenizer_spe_bpe_v500 \
     model.tokenizer.type="bpe" \
     trainer.devices=-1 \
@@ -21,12 +21,13 @@ python ~/NeMo/examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
     model.optim.weight_decay=1e-3 \
     +model.decoding.compute_timestamps=True \
     +model.decoding.preserve_alignments=True \
+    +model.decoding.strategy=greedy \
     trainer.val_check_interval=500 \
     trainer.log_every_n_steps=20 \
-    model.train_ds.batch_size=256 \
+    model.train_ds.batch_size=128 \
     model.validation_ds.batch_size=32 \
     exp_manager.create_wandb_logger=False \
-    exp_manager.create_tensorboard_logger=False
+    exp_manager.create_tensorboard_logger=False \
 
 # python examples/asr/asr_ctc/speech_to_text_ctc_bpe.py \
 #     --config-path="/home/jovyan/NeMo/examples/asr/conf/fastconformer" \

@@ -29,6 +29,8 @@ class DINOv3VRSEncoder(torch.nn.Module):
         self.use_register_tokens = use_register_tokens
         self.dino_embed_dim = self.dino_model.config.hidden_size
 
+        self.dino_ln = nn.LayerNorm(self.dino_embed_dim)
+
         self.num_patches = (self.dino_model.config.image_size // self.dino_model.config.patch_size) ** 2
         if self.use_register_tokens:
             self.num_patches += self.dino_model.config.num_register_tokens
@@ -43,13 +45,16 @@ class DINOv3VRSEncoder(torch.nn.Module):
         self.attn_pooling_query = torch.nn.Parameter(
             torch.randn(1, 1, self.dino_embed_dim)
         )
+        torch.nn.init.normal_(self.attn_pooling_query, mean=0, std=0.02)
+        
         self.attn_pooling = torch.nn.MultiheadAttention(
             embed_dim=self.dino_embed_dim,
             num_heads=4,
             batch_first=True,
         )
 
-        self.conv_preproccessing = nn.Conv1d(self.dino_embed_dim, self.dino_embed_dim, kernel_size=9, padding=4, bias=False)
+        self.conv_preproccessing_bn = nn.BatchNorm1d(self.dino_embed_dim)
+        self.conv_preproccessing = nn.Conv1d(self.dino_embed_dim, self.dino_embed_dim, kernel_size=9, padding=4)
 
         self.conformer_n_layers = conformer_n_layers
         self.conformer_expansion_factor = conformer_expansion_factor
@@ -108,17 +113,22 @@ class DINOv3VRSEncoder(torch.nn.Module):
 
         with self.inference_ctx_fn():
             dino_feats = self.dino_model(pixel_values=video_frames).last_hidden_state  # (B*T, #patches, feat_dim)
+            # dino_feats = torch.randn(B*T, self.num_patches + 1, self.dino_embed_dim, device=video_frames.device)  # Dummy for testing
 
         dino_feats = dino_feats[:, -self.num_patches:, :]  # Get rid of CLS token.
         dino_feats = dino_feats.reshape(B*T, self.num_patches, dino_feats.shape[-1])  # (B, T, #patches, feat_dim)
 
+        dino_feats = self.dino_ln(dino_feats)
+
         # BxT, 1, D
-        pooled_feats = self.attn_pooling(self.attn_pooling_query.repeat((dino_feats.shape[0], 1, 1)), dino_feats, dino_feats, need_weights=False)[0]
+        pooled_feats = self.attn_pooling(self.attn_pooling_query.expand((dino_feats.shape[0], 1, self.attn_pooling_query.shape[-1])), 
+                                         dino_feats, dino_feats, need_weights=False)[0]
         
         # BxTxD
         pooled_feats = pooled_feats.reshape(B, T, dino_feats.shape[-1])
 
         pooled_feats = self.conv_preproccessing(pooled_feats.permute(0, 2, 1)).permute(0, 2, 1)
+        pooled_feats = self.conv_preproccessing_bn(pooled_feats.permute(0, 2, 1)).permute(0, 2, 1)
 
         max_vid_length = pooled_feats.shape[1]
         pad_mask, att_mask = self._create_masks(
