@@ -71,6 +71,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         self.visual_encoder_type = cfg.get("visual_encoder_type", None)
         self.visual_encoder_ckpt_path = cfg.get("visual_encoder_ckpt_path", None)
         self.freeze_visual_encoder = cfg.get("freeze_visual_encoder", False)
+        self.use_preextracted_dino_features = cfg.get("use_preextracted_dino_features", False)
         self.replace_zero_video_frames_with_zero_embeds = cfg.get("replace_zero_video_frames_with_zero_embeds", False)
         if self.extract_features_on_the_fly and (self.visual_encoder_type is None or self.visual_encoder_ckpt_path is None):
             raise ValueError(
@@ -78,7 +79,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 "`visual_encoder_type` and `visual_encoder_ckpt_path` must be provided."
             )
 
-        if self.extract_features_on_the_fly:
+        if self.extract_features_on_the_fly and not self.use_preextracted_dino_features:
             if hasattr(cfg.train_ds, 'return_visual_features'):
                 cfg.train_ds.return_visual_features = False
             if hasattr(cfg.validation_ds, 'return_visual_features'):
@@ -94,6 +95,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if self.visual_encoder_type == 'avhubert':
             self.train_video_transform = VideoTransform(subset="train")
             self.test_video_transform = VideoTransform(subset="test")
+            self.use_preextracted_dino_features = False
         elif self.visual_encoder_type.startswith('dinov3'):
             self.train_video_transform = DINOv3VRSEncoder.get_image_processor(self.visual_encoder_type)
             self.test_video_transform = DINOv3VRSEncoder.get_image_processor(self.visual_encoder_type)
@@ -1019,17 +1021,21 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             sample_id = None
 
         if self.extract_features_on_the_fly:
-            # video_frames: BxTxSxCxHxW
-            # B - Batch, T - time, S - speakers, C - channels (1), H - height, W - width
-            av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+            if self.use_preextracted_dino_features:
+                visual_embeds = self.vis_feat_extractor(video_frames=None, video_lengths=visual_embed_lengths, attention_mask=None, dino_feats=visual_embeds).last_hidden_state.unsqueeze(2).unsqueeze(2) # Add spk,channel dim = 1 layer only.
+                video_lengths = visual_embed_lengths
+            else:
+                # video_frames: BxTxSxCxHxW
+                # B - Batch, T - time, S - speakers, C - channels (1), H - height, W - width
+                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
 
-            # Shape: (B, T, S, C, D)
-            visual_embeds = av_feats
-            visual_embed_lengths = video_lengths
-            if self.replace_zero_video_frames_with_zero_embeds:
-                assert NotImplementedError("Replacing zero video frames with zero embeddings is not implemented for multiple-speaker OTF inference.")
-                for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
-                    visual_embeds[i, zfi[:zfi_len], ...] = 0.0
+                # Shape: (B, T, S, C, D)
+                visual_embeds = av_feats
+                visual_embed_lengths = video_lengths
+                if self.replace_zero_video_frames_with_zero_embeds:
+                    assert NotImplementedError("Replacing zero video frames with zero embeddings is not implemented for multiple-speaker OTF inference.")
+                    for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
+                        visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
         if self.use_audio_encoder:
             # forward() only performs encoder forwardf
@@ -1163,12 +1169,16 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         assert len(signal) == 1
 
         if self.extract_features_on_the_fly:
-            av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
-            visual_embeds = av_feats
-            visual_embed_lengths = video_lengths
-            if self.replace_zero_video_frames_with_zero_embeds:
-                for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
-                    visual_embeds[i, zfi[:zfi_len], ...] = 0.0
+            if self.use_preextracted_dino_features:
+                visual_embeds = self.vis_feat_extractor(video_frames=None, video_lengths=visual_embed_lengths, attention_mask=None, dino_feats=visual_embeds).last_hidden_state.unsqueeze(2).unsqueeze(2) # Add spk,channel dim = 1 layer only.
+                video_lengths = visual_embed_lengths
+            else:
+                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+                visual_embeds = av_feats
+                visual_embed_lengths = video_lengths
+                if self.replace_zero_video_frames_with_zero_embeds:
+                    for i, (zfi, zfi_len) in enumerate(zip(zero_frame_idxes, zero_frame_lengths)):
+                        visual_embeds[i, zfi[:zfi_len], ...] = 0.0
 
         # forward() only performs encoder forward
         if self.use_audio_encoder:

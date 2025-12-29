@@ -106,14 +106,19 @@ class DINOv3VRSEncoder(torch.nn.Module):
     def get_image_processor(model_id):
         return AutoImageProcessor.from_pretrained(f'facebook/{model_id}')
 
-    def forward(self, video_frames: torch.Tensor, video_lengths, attention_mask: torch.Tensor) -> torch.Tensor:
-        # video_frames shape: (B, C, T, H, W) -> (B*T, C, H, W)
-        B, C, T, H, W = video_frames.shape
-        video_frames = video_frames.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+    def forward(self, video_frames: torch.Tensor, video_lengths, attention_mask: torch.Tensor, dino_feats=None) -> torch.Tensor:
 
-        with self.inference_ctx_fn():
-            dino_feats = self.dino_model(pixel_values=video_frames).last_hidden_state  # (B*T, #patches, feat_dim)
-            # dino_feats = torch.randn(B*T, self.num_patches + 1, self.dino_embed_dim, device=video_frames.device)  # Dummy for testing
+        if dino_feats is None:
+            # video_frames shape: (B, C, T, H, W) -> (B*T, C, H, W)
+            B, C, T, H, W = video_frames.shape
+            video_frames = video_frames.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+
+            with self.inference_ctx_fn():
+                dino_feats = self.dino_model(pixel_values=video_frames).last_hidden_state  # (B*T, #patches, feat_dim)
+        else:
+            # dino_feats shape: (B, T, S=1, #patches, feat_dim) -> (B*T, #patches, feat_dim)
+            B, T, _, P, D = dino_feats.shape
+            dino_feats = dino_feats.reshape(B * T, P, D)
 
         dino_feats = dino_feats[:, -self.num_patches:, :]  # Get rid of CLS token.
         dino_feats = dino_feats.reshape(B*T, self.num_patches, dino_feats.shape[-1])  # (B, T, #patches, feat_dim)
