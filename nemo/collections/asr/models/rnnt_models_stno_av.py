@@ -1674,15 +1674,20 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 vis_feat_extractor_group.append(p)
                 processed_param_names.add(n)
 
-        param_groups.append({
-            "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)
-        })
-        param_groups.append({
-            "params": vis_preproc_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_preproc_lr_multiplier', 1)
-        })
-        param_groups.append({
-            "params": vis_feat_extractor_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_feat_extractor_lr_multiplier', 1)
-        })
+        if fddt_group:
+            param_groups.append({
+                "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)
+            })
+
+        if vis_preproc_group:
+            param_groups.append({
+                "params": vis_preproc_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_preproc_lr_multiplier', 1)
+            })
+
+        if vis_feat_extractor_group:
+            param_groups.append({
+                "params": vis_feat_extractor_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_feat_extractor_lr_multiplier', 1)
+            })
 
         if "optim_param_groups" in self.cfg:
             param_groups_cfg = self.cfg.optim_param_groups
