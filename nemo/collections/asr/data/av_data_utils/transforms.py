@@ -109,6 +109,8 @@ class VideoTransform:
             self.video_pipeline = torch.nn.Sequential(
                 FunctionalModule(lambda x: x / 255.0),
                 torchvision.transforms.RandomCrop(88),
+                torchvision.transforms.RandomRotation(10),
+                torchvision.transforms.ColorJitter(brightness=0.2, contrast=0.2),
                 # torchvision.transforms.Grayscale(),
                 AdaptiveTimeMask(10, 25),
                 torchvision.transforms.Normalize(0.421, 0.165),

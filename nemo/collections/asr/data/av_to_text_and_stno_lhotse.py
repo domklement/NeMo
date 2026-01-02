@@ -247,7 +247,7 @@ def _speech_collate_fn(batch, pad_id):
             num_speakers,
         )
     else:
-        sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
+        # sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
         return (
             audio_signal,
             audio_lengths,
@@ -817,6 +817,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             torch.from_numpy(zero_frame_idxes).long() if type(zero_frame_idxes) is np.ndarray else zero_frame_idxes,
             torch.tensor(len(zero_frame_idxes), dtype=torch.long),
             torch.tensor(len(all_speakers), dtype=torch.long) if self.return_all_spks else torch.tensor(1, dtype=torch.long),
+            cut.id
         )
     
     def _get_transformed_spk_video_from_mono_cut(self, cut, spk, start_vid_idx, end_vid_idx) -> torch.Tensor:
@@ -826,7 +827,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         if self.video_transform_type == 'avhubert':
             video_frames = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in video_frames.permute(0, 2, 3, 1).numpy()])
-            video_frames = self.video_transform(torch.from_numpy(video_frames)).unsqueeze(1)  # Add channel dim
+            video_frames = self.video_transform(torch.from_numpy(video_frames).unsqueeze(1))  # Add channel dim
         elif self.video_transform_type == 'dinov3':
             video_frames = self.video_transform(video_frames, return_tensors="pt")['pixel_values'].to('cpu')
 
