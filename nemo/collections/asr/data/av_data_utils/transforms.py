@@ -126,6 +126,8 @@ class VideoTransform:
     def __call__(self, sample):
         # sample: T x C x H x W
         # rtype: T x 1 x H x W
+        assert len(sample.shape) == 4
+        assert sample.shape[1] == 1
         return self.video_pipeline(sample)
 
 

@@ -499,12 +499,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                     break
         return path
     
-    def _pad_video_frames_for_track(self, video_frames: np.ndarray, track, total_duration: float) -> np.ndarray:
+    def _pad_video_frames_for_track(self, video_frames: torch.Tensor, track, total_duration: float) -> torch.Tensor:
         """
         Pad video frames before and after based on track offset and duration.
         
         Args:
-            video_frames: Video frames array with shape (T, C, H, W)
+            video_frames: Video frames tensor with shape (T, C, H, W)
             track: The track object containing offset information
             total_duration: Total duration of the mixed cut
             
@@ -521,9 +521,9 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         # Create zero padding frames with same height and width as video_frames
         if len(video_frames) > 0:
             c, h, w = video_frames.shape[1], video_frames.shape[2], video_frames.shape[3]
-            pad_before = np.zeros((frames_before, c, h, w), dtype=video_frames.dtype)
-            pad_after = np.zeros((frames_after, c, h, w), dtype=video_frames.dtype)
-            padded_frames = np.concatenate([pad_before, video_frames, pad_after], axis=0)
+            pad_before = torch.zeros((frames_before, c, h, w), dtype=video_frames.dtype, device=video_frames.device)
+            pad_after = torch.zeros((frames_after, c, h, w), dtype=video_frames.dtype, device=video_frames.device)
+            padded_frames = torch.cat([pad_before, video_frames, pad_after], dim=0)
         else:
             # If video_frames is empty, create all zero frames
             # Use a default frame size or raise an error

@@ -1660,6 +1660,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         fddt_group = []
         vis_preproc_group = []
         vis_feat_extractor_group = []
+        audio_encoder_group = []
 
         processed_param_names = set()
 
@@ -1673,21 +1674,33 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             elif 'vis_feat_extractor' in n:
                 vis_feat_extractor_group.append(p)
                 processed_param_names.add(n)
+            elif 'encoder.' in n:
+                audio_encoder_group.append(p)
+                processed_param_names.add(n)
+
+        assert audio_encoder_group, "Audio encoder group is empty!"
+        param_groups.append({
+            "params": audio_encoder_group, "lr": self.cfg.optim.lr * self.cfg.get('audio_encoder_lr_multiplier', 1)
+        })
+        print(f"Audio encoder lr: {self.cfg.optim.lr * self.cfg.get('audio_encoder_lr_multiplier', 1)}")
 
         if fddt_group:
             param_groups.append({
                 "params": fddt_group, "lr": self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)
             })
+            print(f"FDDT lr: {self.cfg.optim.lr * self.cfg.get('fddt_lr_multiplier', 1)}")
 
         if vis_preproc_group:
             param_groups.append({
                 "params": vis_preproc_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_preproc_lr_multiplier', 1)
             })
+            print(f"Visual preprocessing lr: {self.cfg.optim.lr * self.cfg.get('vis_preproc_lr_multiplier', 1)}")
 
         if vis_feat_extractor_group:
             param_groups.append({
                 "params": vis_feat_extractor_group, "lr": self.cfg.optim.lr * self.cfg.get('vis_feat_extractor_lr_multiplier', 1)
             })
+            print(f"Visual feature extractor lr: {self.cfg.optim.lr * self.cfg.get('vis_feat_extractor_lr_multiplier', 1)}")
 
         if "optim_param_groups" in self.cfg:
             param_groups_cfg = self.cfg.optim_param_groups

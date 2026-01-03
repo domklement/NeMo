@@ -181,6 +181,13 @@ class VisualConditioningModule(nn.Module):
         elif visual_conditioning_method == 'add_project':
             self.proj = nn.Linear(d_model, d_model)
             self.proj.weight.data = torch.eye(d_model) * 0.02
+        elif visual_conditioning_method == 'add_project_mul_gate':
+            self.proj = nn.Linear(d_model, d_model)
+            self.proj.weight.data = torch.eye(d_model) * 0.02
+            self.gate = nn.Linear(2*d_model, d_model)
+            with torch.no_grad():
+                self.gate.bias.data = torch.full((d_model,), 2.0)
+                self.gate.weight.data *= 0.02
         elif visual_conditioning_method == 'add_project_gate':
             self.proj = nn.Linear(d_model, d_model)
             self.proj.weight.data = torch.eye(d_model) * 0.02
@@ -226,6 +233,11 @@ class VisualConditioningModule(nn.Module):
             conditioned_audio = audio_signal + visual_embeds
         elif self.visual_conditioning_method == 'add_project':
             conditioned_audio = audio_signal + self.proj(visual_embeds)
+        elif self.visual_conditioning_method == 'add_project_mul_gate':
+            projected_vis = self.proj(visual_embeds)
+            gate_input = torch.cat([audio_signal, visual_embeds], dim=-1)
+            alpha = torch.sigmoid(self.gate(gate_input))
+            conditioned_audio = alpha*audio_signal + projected_vis
         elif self.visual_conditioning_method == 'add_project_gate':
             projected_vis = self.proj(visual_embeds)
             gate_input = torch.cat([audio_signal, projected_vis], dim=-1)
