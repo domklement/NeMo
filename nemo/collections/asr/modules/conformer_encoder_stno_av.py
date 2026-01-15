@@ -97,7 +97,7 @@ class VisualProcessingModule(nn.Module):
 
         # Embedding aggregation parameters
         if conditioning_embed_aggr_method in {'wavg', 'softmax_wavg'}:
-            self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds) / self.num_conditioning_embeds)
+            self.log_weights = nn.Parameter(torch.ones(num_conditioning_embeds))
 
     def forward(self, visual_embeds, audio_signal=None):
         is_multispeaker = len(visual_embeds.shape) == 5
@@ -169,12 +169,59 @@ class ConcatAdapter(nn.Module):
         return h + alpha * delta
 
 
+class NonLinCrossFadeFusion(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.d_model = d_model
+
+        self.vis_adapter = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.LayerNorm(d_model * 2),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(d_model * 2, d_model)
+        )
+        
+        # 2. Bottleneck Gate Network (The Fusion)
+        # Compresses input to force feature selection
+        self.gate_net = nn.Sequential(
+            nn.Linear(2 * d_model, d_model // 2),
+            nn.SiLU(), 
+            nn.Linear(d_model // 2, d_model),
+            nn.Sigmoid()
+        )
+
+        # Norms
+        self.audio_ln = nn.LayerNorm(d_model)
+
+    def forward(self, audio, visual):
+        # Transform Visuals to "Pseudo-Audio" space
+        vis_feat = self.vis_adapter(visual)
+        audio_norm = self.audio_ln(audio)
+        
+        # Calculate Balance (Gate)
+        # 1.0 = Trust Audio, 0.0 = Trust Video
+        gate_input = torch.cat([audio_norm, vis_feat], dim=-1)
+        gate = self.gate_net(gate_input)
+        
+        # The Cross-Fade
+        # Instead of adding noise (Visual) on top of clean Audio,
+        # we smoothly interpolate between them.
+        out = (audio * gate) + (vis_feat * (1 - gate))
+        
+        return out
+
+
 class VisualConditioningModule(nn.Module):
     def __init__(self, d_model, visual_conditioning_method, modality_dropout_prob=0.0, **kwargs):
         super().__init__()
         self.d_model = d_model
         self.visual_conditioning_method = visual_conditioning_method
         self.modality_dropout_prob = modality_dropout_prob
+
+        if 'norm' in visual_conditioning_method:
+            self.audio_ln = nn.LayerNorm(d_model)
+            self.visual_ln = nn.LayerNorm(d_model)
 
         if visual_conditioning_method == 'add_gate':
             self.gate = nn.Parameter(torch.full((d_model,), -3.0))  # per-channel gate
@@ -188,12 +235,12 @@ class VisualConditioningModule(nn.Module):
             with torch.no_grad():
                 self.gate.bias.data = torch.full((d_model,), 2.0)
                 self.gate.weight.data *= 0.02
+        elif visual_conditioning_method == 'non_lin_cross_fade':
+            self.fusion_module = NonLinCrossFadeFusion(d_model)
         elif visual_conditioning_method == 'project_mul_gate_norm':
             self.silence_bias = nn.Parameter(torch.zeros((d_model,)))
             self.proj = nn.Linear(d_model, d_model)
             self.gate = nn.Linear(2*d_model, d_model)
-            self.audio_ln = nn.LayerNorm(d_model)
-            self.visual_ln = nn.LayerNorm(d_model)
         elif visual_conditioning_method == 'add_project_gate':
             self.proj = nn.Linear(d_model, d_model)
             self.proj.weight.data = torch.eye(d_model) * 0.02
@@ -244,6 +291,13 @@ class VisualConditioningModule(nn.Module):
             gate_input = torch.cat([audio_signal, visual_embeds], dim=-1)
             alpha = torch.sigmoid(self.gate(gate_input))
             conditioned_audio = alpha*audio_signal + projected_vis
+        elif self.visual_conditioning_method == 'add_project_mul_gate_norm':
+            projected_vis = self.proj(visual_embeds)
+            gate_input = torch.cat([self.audio_ln(audio_signal), self.visual_ln(visual_embeds)], dim=-1)
+            alpha = torch.sigmoid(self.gate(gate_input))
+            conditioned_audio = alpha*audio_signal + projected_vis
+        elif self.visual_conditioning_method == 'non_lin_cross_fade':
+            conditioned_audio = self.fusion_module(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'project_mul_gate_norm':
             projected_vis = self.proj(visual_embeds)
             gate_input = torch.cat([self.audio_ln(audio_signal), self.visual_ln(visual_embeds)], dim=-1)
@@ -252,6 +306,11 @@ class VisualConditioningModule(nn.Module):
         elif self.visual_conditioning_method == 'add_project_gate':
             projected_vis = self.proj(visual_embeds)
             gate_input = torch.cat([audio_signal, projected_vis], dim=-1)
+            alpha = torch.sigmoid(self.gate_proj(gate_input))
+            conditioned_audio = audio_signal + alpha * projected_vis
+        elif self.visual_conditioning_method == 'add_project_norm_gate':
+            projected_vis = self.proj(visual_embeds)
+            gate_input = torch.cat([self.audio_ln(audio_signal), self.visual_ln(visual_embeds)], dim=-1)
             alpha = torch.sigmoid(self.gate_proj(gate_input))
             conditioned_audio = audio_signal + alpha * projected_vis
         elif self.visual_conditioning_method == 'add_gate':
