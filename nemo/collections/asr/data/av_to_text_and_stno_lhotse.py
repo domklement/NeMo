@@ -363,6 +363,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         max_random_audio_mask_span_seconds: float = 0.0,
         max_random_audio_mask_ratio: float = 0.3,
         return_all_spks: bool = False,
+        txt_norm_type: str = 'whisper_nsf',
     ): 
         print("VAL:", val)
         
@@ -382,14 +383,13 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
             self.pad_id = 0
 
         class TokenizerWrapper:
-            def __init__(self, tokenizer):
+            def __init__(self, tokenizer, txt_norm_type):
                 if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
                     self.is_aggregate = True
                 else:
                     self.is_aggregate = False
                 self._tokenizer = tokenizer
-                # TODO: Make this configurable
-                self.text_norm = get_text_norm('whisper_nsf')
+                self.text_norm = get_text_norm(txt_norm_type)
 
             def __call__(self, *args):
                 if isinstance(args[0], List) and self.is_aggregate:
@@ -406,7 +406,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
 
         self.cutset = load_manifest(manifest_filepath)
-        self.tokenizer = TokenizerWrapper(tokenizer)
+        self.tokenizer = TokenizerWrapper(tokenizer, txt_norm_type)
         self.sample_rate = sample_rate
         self.max_training_rand_seg_duration = max_training_rand_seg_duration
         self.return_sample_id = return_sample_id

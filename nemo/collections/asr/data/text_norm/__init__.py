@@ -12,7 +12,9 @@ from .mlc_norm import MLCTextNormalizer
 
 
 def get_text_norm(t_norm: str):
-    if t_norm == 'whisper':
+    if t_norm == 'whisper_basic':
+        return EnglishTextNormalizer({})
+    elif t_norm == 'whisper':
         SPELLING_CORRECTIONS = json.load(open(f'{os.path.dirname(__file__)}/english.json'))
         return EnglishTextNormalizer(SPELLING_CORRECTIONS)
     elif t_norm == 'whisper_nsf':

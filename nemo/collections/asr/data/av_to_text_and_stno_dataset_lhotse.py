@@ -68,6 +68,7 @@ def get_av_to_text_and_stno_lhotse_dataset(
         replace_path_prefixes=cfg.get("replace_path_prefixes", None),
         replace_path_replacements=cfg.get("replace_path_replacements", None),
         return_all_spks=cfg.get("return_all_spks", False),
+        txt_norm_type=cfg.get("txt_norm_type", "whisper_nsf"),
         audio_transform=audio_transform,
         video_transform=video_transform,
         video_transform_type=video_transform_type,
