@@ -364,8 +364,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         max_random_audio_mask_ratio: float = 0.3,
         return_all_spks: bool = False,
         txt_norm_type: str = 'whisper_nsf',
-    ): 
-        print("VAL:", val)
+    ):
+        # print("VAL:", val)
         
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             self.bos_id = tokenizer.bos_id
@@ -565,9 +565,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
             # We need to build the per_spk video dict.
             per_spk_videos = dict()
-            for t in cut.tracks:
-                if t.cut.has_video:
-                    per_spk_videos[t.cut.supervisions[0].speaker] = t.cut.recording.sources[0].source
+            if self.video_key in cut.custom:
+                per_spk_videos = cut.custom[self.video_key]
+            else:
+                for t in cut.tracks:
+                    if t.cut.has_video:
+                        per_spk_videos[t.cut.supervisions[0].speaker] = t.cut.recording.sources[0].source
 
         cut_duration = cut.duration
         spk_specific_supervisions = list(filter(lambda s: s.speaker == target_spk, cut.supervisions ))
