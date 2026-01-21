@@ -735,7 +735,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
                 # if self.return_all_spks:
                 # Load all video frames for the track
-                per_spk_tracks = dict([(t.cut.supervisions[0].speaker, t) for t in cut.tracks])
+                # per_spk_tracks = dict([(t.cut.supervisions[0].speaker, t) for t in cut.tracks])
+                per_spk_tracks = dict([(s, t) for t in cut.tracks for s in CutSet.from_cuts([t.cut]).speakers])
                 track = per_spk_tracks[target_spk]
 
                 # Target speaker is always going to be the first one.
@@ -857,14 +858,17 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
     
     def _build_per_spk_vid_paths(self, cut):
         if isinstance(cut, MixedCut):
-            per_spk_videos = dict()
-            for t in cut.tracks:
-                t_cut = t.cut
-                if self.video_key in t_cut.custom:
-                    per_spk_videos.update(t_cut.custom[self.video_key])
-                else:
-                    logging.warning(f"Video key {self.video_key} not found in track cut custom for cut {t_cut.id}. Using recording source instead.")
-                    per_spk_videos[t_cut.supervisions[0].speaker] = t_cut.recording.sources[0].source
+            if self.video_key in cut.custom:
+                per_spk_videos = cut.custom[self.video_key]
+            else:
+                per_spk_videos = dict()
+                for t in cut.tracks:
+                    t_cut = t.cut
+                    if self.video_key in t_cut.custom:
+                        per_spk_videos.update(t_cut.custom[self.video_key])
+                    else:
+                        logging.warning(f"Video key {self.video_key} not found in track cut custom for cut {t_cut.id}. Using recording source instead.")
+                        per_spk_videos[t_cut.supervisions[0].speaker] = t_cut.recording.sources[0].source
         else:
             per_spk_videos = cut.custom.get(self.video_key, dict())
 
