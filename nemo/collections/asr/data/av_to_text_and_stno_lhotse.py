@@ -858,9 +858,14 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
     
     def _build_per_spk_vid_paths(self, cut):
         if isinstance(cut, MixedCut):
+            all_speakers = CutSet.from_cuts([cut]).speakers
+            per_spk_videos = dict()
             if self.video_key in cut.custom:
                 per_spk_videos = cut.custom[self.video_key]
-            else:
+                if set(per_spk_videos.keys()) != set(all_speakers):
+                    per_spk_videos = dict()
+            
+            if not per_spk_videos:
                 per_spk_videos = dict()
                 for t in cut.tracks:
                     t_cut = t.cut
