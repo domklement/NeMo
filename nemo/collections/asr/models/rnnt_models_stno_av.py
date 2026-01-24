@@ -29,6 +29,7 @@ from nemo.collections.asr.data.audio_to_text_dali import AudioToCharDALIDataset,
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.losses.rnnt import RNNTLoss, resolve_rnnt_default_loss_name
 from nemo.collections.asr.metrics.wer import WER
+from nemo.collections.asr.metrics.meeteval_mt_wer import MeetevalMTWER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.modules.rnnt import RNNTDecoderJoint
 from nemo.collections.asr.modules.avhubert import AVHubertAVSR, make_non_pad_mask
@@ -443,6 +444,61 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             partial_hypothesis=partial_hypothesis,
         )
 
+    def custom_transcribe_single_utt(self,
+        audio: torch.Tensor,
+        video: torch.Tensor,
+        num_speakers: torch.Tensor,
+        return_hypotheses: bool = False,
+        partial_hypothesis: Optional[List['Hypothesis']] = None,
+        channel_selector = 'avg',
+        timestamps: Optional[bool] = None,
+        override_config: Optional[TranscribeConfig] = None):
+
+        timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
+        if timestamps is not None:
+            if timestamps or (override_config is not None and override_config.timestamps):
+                logging.info(
+                    "Timestamps requested, setting decoding timestamps to True. Capture them in Hypothesis object, \
+                        with output[0][idx].timestep['word'/'segment'/'char']"
+                )
+                return_hypotheses = True
+                with open_dict(self.cfg.decoding):
+                    self.cfg.decoding.compute_timestamps = True
+                    self.cfg.decoding.preserve_alignments = True
+            else:
+                return_hypotheses = False
+                with open_dict(self.cfg.decoding):
+                    self.cfg.decoding.compute_timestamps = False
+                    self.cfg.decoding.preserve_alignments = False
+
+            self.change_decoding_strategy(self.cfg.decoding, verbose=False)
+
+        # We need to create the batch.
+        with torch.no_grad():
+            audio = audio.unsqueeze(0)  # Add batch dim
+            audio_lengths = torch.tensor([audio.shape[-1]], dtype=torch.int64, device=audio.device)
+            video = video.unsqueeze(0)  # Add batch dim
+            video_lengths = torch.tensor([video.shape[1]], dtype=torch.int64, device=video.device)
+            
+            visual_embeds = self.get_visual_feats(video, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+
+            encoded, encoded_len = self.forward(input_signal=audio, input_signal_length=audio_lengths, stno_mask=None, stno_mask_length=None, visual_embeds=visual_embeds, visual_embed_lengths=video_lengths, num_speakers=num_speakers)
+
+            hyp = self.decoding.rnnt_decoder_predictions_tensor(
+                encoded,
+                encoded_len,
+                # return_hypotheses=trcfg.return_hypotheses,
+                # partial_hypotheses=trcfg.partial_hypothesis,
+            )[0]
+
+            del visual_embeds
+            del encoded
+            del encoded_len
+            del audio_lengths
+            del video_lengths
+
+        return hyp
+
     def change_vocabulary(self, new_vocabulary: List[str], decoding_cfg: Optional[DictConfig] = None):
         """
         Changes vocabulary used during RNNT decoding process. Use this method when fine-tuning a 
@@ -568,6 +624,13 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             use_cer=self.wer.use_cer,
             log_prediction=self.wer.log_prediction,
             dist_sync_on_step=True,
+        )
+        
+        self.meeteval_mt_wer = MeetevalMTWER(
+            decoding=self.decoding,
+            dist_sync_on_step=False,
+            log_prediction=self.meeteval_mt_wer.log_prediction,
+            embed_duration=self.embed_duration,
         )
 
         # Setup fused Joint step
