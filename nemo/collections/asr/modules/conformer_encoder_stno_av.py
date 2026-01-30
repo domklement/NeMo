@@ -80,20 +80,23 @@ class VisualProcessingModule(nn.Module):
 
         self.visual_ln = nn.LayerNorm(d_model)
         self.output_linear = nn.Linear(d_model, d_model)
-        self.visual_conv_downsampling = torch.nn.Conv1d(in_channels=d_visual_embeds, 
-                                                        out_channels=d_model, 
-                                                        kernel_size=5, 
-                                                        stride=visual_downsampling_factor, 
-                                                        padding=2)
 
         # Extra conditioning parameters
         if self.visual_preprocessing_model == 'extra_conv':
             self.extra_ln = nn.LayerNorm(d_model)
             self.extra_conv = torch.nn.Conv1d(in_channels=d_visual_embeds, 
-                                              out_channels=d_model, 
-                                              kernel_size=9, 
-                                              stride=1, 
-                                              padding=4)
+                                            out_channels=d_model, 
+                                            kernel_size=9, 
+                                            stride=1, 
+                                            padding=4)
+        elif self.visual_preprocessing_model == 'resnet_like':
+            self.resnet_block = ResNetLikeBlock(d_visual_embeds)
+        elif self.visual_preprocessing_model == 'base':
+            self.visual_conv_downsampling = torch.nn.Conv1d(in_channels=d_visual_embeds, 
+                                                        out_channels=d_model, 
+                                                        kernel_size=5, 
+                                                        stride=visual_downsampling_factor, 
+                                                        padding=2)
 
         # Embedding aggregation parameters
         if conditioning_embed_aggr_method in {'wavg', 'softmax_wavg'}:
@@ -118,9 +121,12 @@ class VisualProcessingModule(nn.Module):
 
         # visual_embeds: (B, T, D)
         B_v, T_v, D_v = visual_embeds.shape
-        downsampled_visual_embeds = self.visual_conv_downsampling(
-            visual_embeds.permute(0, 2, 1).reshape(B_v, D_v, T_v)
-        ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
+        if self.visual_preprocessing_model == 'resnet_like':
+            downsampled_visual_embeds = self.resnet_block(visual_embeds)
+        else:
+            downsampled_visual_embeds = self.visual_conv_downsampling(
+                visual_embeds.permute(0, 2, 1).reshape(B_v, D_v, T_v)
+            ).reshape(B_v, self.d_model, -1).transpose(-1, -2)
 
         # Sometimes, the audio shape can be off-by-one. Fix it by either getting rid of or adding one frame.
         shape_diff = audio_signal.shape[1] - downsampled_visual_embeds.shape[1] if audio_signal is not None else 0
@@ -147,6 +153,39 @@ class VisualProcessingModule(nn.Module):
         
         return self.visual_ln(self.output_linear(downsampled_visual_embeds))
     
+class ResNetLikeBlock(nn.Module):
+    """
+    Expands the temporal receptive field of visual features
+    using stacked dilated convolutions with 2x temporal downsampling.
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            # Layer 1: Local details with 2x downsampling (k=3, d=1, s=2)
+            nn.Conv1d(dim, dim, kernel_size=3, stride=2, padding=1, dilation=1),
+            nn.BatchNorm1d(dim),
+            nn.SiLU(),
+            
+            # Layer 2: Medium context (k=3, d=2) -> RF: 7 frames
+            nn.Conv1d(dim, dim, kernel_size=3, padding=2, dilation=2),
+            nn.BatchNorm1d(dim),
+            nn.SiLU(),
+            
+            # Layer 3: Word-level context (k=3, d=4) -> RF: 15 frames (~600ms)
+            nn.Conv1d(dim, dim, kernel_size=3, padding=4, dilation=4),
+            nn.BatchNorm1d(dim),
+            nn.SiLU(),
+        )
+        # Downsample residual to match the strided convolution output
+        self.residual_downsample = nn.Conv1d(dim, dim, kernel_size=1, stride=2)
+        
+    def forward(self, x):
+        # x: [B, T, D]
+        x_in = x.transpose(1, 2) # Swap for Conv1d: [B, D, T]
+        residual = self.residual_downsample(x_in)
+        out = self.net(x_in)
+        out = (out + residual).transpose(1, 2)
+        return out
 
 class ConcatAdapter(nn.Module):
     def __init__(self, d_model, bottleneck=128):
@@ -170,9 +209,10 @@ class ConcatAdapter(nn.Module):
 
 
 class NonLinCrossFadeFusion(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model, use_film_fusion=False):
         super().__init__()
         self.d_model = d_model
+        self.use_film_fusion = use_film_fusion
 
         self.vis_adapter = nn.Sequential(
             nn.Linear(d_model, d_model * 2),
@@ -182,17 +222,42 @@ class NonLinCrossFadeFusion(nn.Module):
             nn.Linear(d_model * 2, d_model)
         )
         
-        # 2. Bottleneck Gate Network (The Fusion)
-        # Compresses input to force feature selection
-        self.gate_net = nn.Sequential(
-            nn.Linear(2 * d_model, d_model // 2),
-            nn.SiLU(), 
-            nn.Linear(d_model // 2, d_model),
-            nn.Sigmoid()
-        )
+        # # 2. Bottleneck Gate Network (The Fusion)
+        # # Compresses input to force feature selection
+        # self.gate_net = nn.Sequential(
+        #     nn.Linear(2 * d_model, d_model // 2),
+        #     nn.SiLU(), 
+        #     nn.Linear(d_model // 2, d_model),
+        #     nn.Sigmoid()
+        # )
+        
+        if self.use_film_fusion:
+            self.concat_net = self._build_concat_downproject_net(2 * d_model, d_model, d_model)
+            self.film = FiLM(d_model)
+        else:
+            # self.gate_net = nn.Sequential(
+            #     nn.Linear(2 * d_model, d_model // 2),
+            #     nn.SiLU(), 
+            #     nn.Linear(d_model // 2, d_model),
+            #     nn.Sigmoid()
+            # )
+            self.gate_net = self._build_concat_downproject_net(2 * d_model, d_model // 2, d_model, add_sigmoid=True)
 
         # Norms
         self.audio_ln = nn.LayerNorm(d_model)
+
+    def _build_concat_downproject_net(self, input_dim, bottleneck_dim, output_dim, add_sigmoid=False):
+
+        layers = [
+            nn.Linear(input_dim, bottleneck_dim),
+            nn.SiLU(),
+            nn.Linear(bottleneck_dim, output_dim),
+        ]
+        if add_sigmoid:
+            layers.append(nn.Sigmoid())
+
+        return nn.Sequential(*layers)
+
 
     def forward(self, audio, visual):
         # Transform Visuals to "Pseudo-Audio" space
@@ -202,12 +267,17 @@ class NonLinCrossFadeFusion(nn.Module):
         # Calculate Balance (Gate)
         # 1.0 = Trust Audio, 0.0 = Trust Video
         gate_input = torch.cat([audio_norm, vis_feat], dim=-1)
-        gate = self.gate_net(gate_input)
-        
-        # The Cross-Fade
-        # Instead of adding noise (Visual) on top of clean Audio,
-        # we smoothly interpolate between them.
-        out = (audio * gate) + (vis_feat * (1 - gate))
+
+        if self.use_film_fusion:
+            concat_proj_representations = self.concat_net(gate_input)
+            out = self.film(audio, concat_proj_representations)
+        else:
+            gate = self.gate_net(gate_input)
+            
+            # The Cross-Fade
+            # Instead of adding noise (Visual) on top of clean Audio,
+            # we smoothly interpolate between them.
+            out = (audio * gate) + (vis_feat * (1 - gate))
         
         return out
 
@@ -237,6 +307,8 @@ class VisualConditioningModule(nn.Module):
                 self.gate.weight.data *= 0.02
         elif visual_conditioning_method == 'non_lin_cross_fade':
             self.fusion_module = NonLinCrossFadeFusion(d_model)
+        elif visual_conditioning_method == 'non_lin_cross_fade_film':
+            self.fusion_module = NonLinCrossFadeFusion(d_model, use_film_fusion=True)
         elif visual_conditioning_method == 'project_mul_gate_norm':
             self.silence_bias = nn.Parameter(torch.zeros((d_model,)))
             self.proj = nn.Linear(d_model, d_model)
@@ -297,6 +369,8 @@ class VisualConditioningModule(nn.Module):
             alpha = torch.sigmoid(self.gate(gate_input))
             conditioned_audio = alpha*audio_signal + projected_vis
         elif self.visual_conditioning_method == 'non_lin_cross_fade':
+            conditioned_audio = self.fusion_module(audio_signal, visual_embeds)
+        elif self.visual_conditioning_method == 'non_lin_cross_fade_film':
             conditioned_audio = self.fusion_module(audio_signal, visual_embeds)
         elif self.visual_conditioning_method == 'project_mul_gate_norm':
             projected_vis = self.proj(visual_embeds)
