@@ -6,6 +6,7 @@ https://github.com/chimechallenge/chime-utils/tree/main/chime_utils/text_norm
 import json
 import os
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
+from nemo_text_processing.text_normalization.normalize import Normalizer
 from .basic import BasicTextNormalizer as BasicTextNormalizer
 from .english import EnglishTextNormalizer as EnglishTextNormalizerNSF
 from .mlc_norm import MLCTextNormalizer
@@ -27,5 +28,8 @@ def get_text_norm(t_norm: str):
         return EnglishTextNormalizerNSF()
     elif t_norm == 'mlc-slm':
         return MLCTextNormalizer()
+    elif t_norm == 'nemo_en_cased':
+        normalizer = Normalizer(input_case='cased', lang='en')
+        return normalizer.normalize
     else:
         raise ValueError(f"Unsupported text normalization type: {t_norm}")
