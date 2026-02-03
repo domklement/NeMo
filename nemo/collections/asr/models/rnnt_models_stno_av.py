@@ -66,6 +66,11 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if trainer is not None:
             self.world_size = trainer.world_size
 
+        self.save_train_av_debug = cfg.get("save_train_av_debug", False)
+        if self.save_train_av_debug:
+            self.train_av_debug_dir = cfg.get("train_av_debug_dir", None)
+            assert self.train_av_debug_dir is not None, "train_av_debug_dir must be specified if save_train_av_debug is True"
+
         # VISUAL EMBEDDING EXTRACTION CONFIGS
         self.extract_features_on_the_fly = cfg.get("extract_features_on_the_fly", False)
         self.extract_visual_features_all_layers = cfg.get("extract_visual_features_all_layers", False)
@@ -452,6 +457,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         partial_hypothesis: Optional[List['Hypothesis']] = None,
         channel_selector = 'avg',
         timestamps: Optional[bool] = None,
+        avhubert_chunk_size: int = 10,
         override_config: Optional[TranscribeConfig] = None):
 
         timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
@@ -480,13 +486,14 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             video = video.unsqueeze(0)  # Add batch dim
             video_lengths = torch.tensor([video.shape[1]], dtype=torch.int64, device=video.device)
             
-            visual_embeds = self.get_visual_feats(video, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+            visual_embeds = self.get_visual_feats(video, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=avhubert_chunk_size, batched=True)
 
             encoded, encoded_len = self.forward(input_signal=audio, input_signal_length=audio_lengths, stno_mask=None, stno_mask_length=None, visual_embeds=visual_embeds, visual_embed_lengths=video_lengths, num_speakers=num_speakers)
 
             hyp = self.decoding.rnnt_decoder_predictions_tensor(
                 encoded,
                 encoded_len,
+                return_hypotheses=return_hypotheses,
                 # return_hypotheses=trcfg.return_hypotheses,
                 # partial_hypotheses=trcfg.partial_hypothesis,
             )[0]
@@ -1082,6 +1089,54 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         else:
             signal, signal_len, transcript, transcript_len, stno_mask, stno_mask_len, utt_ids, spk_ids, visual_embeds, visual_embed_lengths, video_frames, video_lengths, zero_frame_idxes, zero_frame_lengths, num_speakers = batch
             sample_id = None
+
+        if self.save_train_av_debug and is_global_rank_zero():
+            # SAVE sample:
+            # signal: (B,T)
+            # video: (B,T,S,C,H,W)
+            audio = signal[0]
+            video = video_frames[0, :, 0, ...]
+            video = ((video * 0.165 + 0.421) * 255.0).to(torch.uint8)
+            text = self.tokenizer.ids_to_text(transcript)[0]
+
+            # Save debug data
+            import os
+            import torchaudio
+            import torchvision
+            from pathlib import Path
+            
+            debug_dir = Path(self.train_av_debug_dir)
+            debug_dir.mkdir(exist_ok=True, parents=True)
+            
+            # Generate unique filename using sample_id or global_step
+            if sample_id is not None:
+                filename_base = f"sample_{sample_id[0] if isinstance(sample_id, (list, torch.Tensor)) else sample_id}"
+            else:
+                filename_base = f"step_{self.trainer.global_step}_batch_{batch_nb}"
+            
+            # Prepare video and audio data
+            sample_rate = getattr(self.preprocessor, '_sample_rate', 16000)
+            video_tensor = video.permute(0, 2, 3, 1).cpu()  # (T, C, H, W) -> (T, H, W, C)
+            audio_tensor = audio.unsqueeze(0).cpu()  # (T,) -> (1, T) for mono audio
+            
+            # Save video with embedded audio
+            video_path = debug_dir / f"{filename_base}.mp4"
+            torchvision.io.write_video(
+                str(video_path), 
+                video_tensor.repeat(1, 1, 1, 3), 
+                fps=25,
+                audio_array=audio_tensor,
+                audio_fps=sample_rate,
+                audio_codec='aac',
+                options = {"crf": "17"},
+            )
+            
+            # Save text
+            text_path = debug_dir / f"{filename_base}.txt"
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            
+            print(f"Saved debug sample to {debug_dir / filename_base}.*")
 
         if self.extract_features_on_the_fly:
             if self.use_preextracted_dino_features:

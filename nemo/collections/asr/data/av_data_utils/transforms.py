@@ -241,6 +241,7 @@ class VideoTransform:
                 torchvision.transforms.RandomCrop(88),
                 # torchvision.transforms.RandomRotation(10),
                 # torchvision.transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                torchvision.transforms.GaussianBlur((5,5), (0.01, 0.5)),
                 TemporalRandomWalk1D(
                     frame_transform=rotate_frame,
                     p=0.9,
