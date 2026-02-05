@@ -237,7 +237,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if stage == 'fit' and self.freeze_nonvision_parameters:
             logging.info("Freezing non-visual parameters for optimizer setup.")
             self.eval()
-            for _, param in self.named_parameters():
+            for _, param in self.encoder.named_parameters():
                 param.requires_grad = False
             
             if not self.freeze_vision_parameters:
