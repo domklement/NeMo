@@ -595,7 +595,8 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 selected_supervisions.append(sup)
 
         # We need to adjust the rand end according to the last spoken supervision.
-        rand_end = max(sup.end for sup in selected_supervisions) + 0.3 if selected_supervisions else rand_end
+        if not self.val:
+            rand_end = max(sup.end for sup in selected_supervisions) + 0.3 if selected_supervisions else rand_end
 
         start_sample = int(rand_start * self.sample_rate)
         start_second = start_sample / self.sample_rate

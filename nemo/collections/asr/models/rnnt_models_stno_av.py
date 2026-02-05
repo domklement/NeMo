@@ -215,6 +215,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             self.joint.set_wer(self.wer)
 
         self.freeze_nonvision_parameters = self.cfg.get('freeze_nonvision_parameters', False)
+        self.freeze_vision_parameters = self.cfg.get('freeze_vision_parameters', False)
 
         # pretrained_model_path = '/home/jovyan/NeMo/examples/asr/av_ts_asr_transducer/avhubert/model-bin/avsr_cocktail_mcorec_finetune'
         # self.vis_feat_extractor = AVHubertAVSR.from_pretrained(pretrained_model_path)
@@ -239,7 +240,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             for _, param in self.named_parameters():
                 param.requires_grad = False
             
-            self.encoder.unfreeze_visual_parameters()
+            if not self.freeze_vision_parameters:
+                self.encoder.unfreeze_visual_parameters()
 
         if self.freeze_rnnt:
             logging.info("Freezing RNNT parameters for optimizer setup.")

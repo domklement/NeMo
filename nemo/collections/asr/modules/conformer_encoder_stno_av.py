@@ -1130,7 +1130,7 @@ class ConformerEncoderSTNOAV(ConformerEncoderSTNO):
             if self.use_visual_conditioning_on_all_layers:
                 if self.share_visual_preprocessing:
                     # Reuse the shared preprocessed visual embeddings
-                    audio_signal = self.conditioning_modules[lth](audio_signal=audio_signal, visual_embeds=downsampled_visual_embeds, att_mask=att_mask, num_speakers=num_speakers)
+                    audio_signal = self.conditioning_modules[lth](audio_signal=audio_signal, visual_embeds=downsampled_visual_embeds_shared, att_mask=att_mask, num_speakers=num_speakers)
                 else:
                     # Use per-layer preprocessing
                     downsampled_visual_embeds = self.processing_modules[lth](visual_embeds, audio_signal)
