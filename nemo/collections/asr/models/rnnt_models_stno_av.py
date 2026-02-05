@@ -99,7 +99,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         self.audio_transform = AudioTransform(subset="test")
 
         if self.visual_encoder_type == 'avhubert':
-            self.train_video_transform = VideoTransform(subset="train")
+            self.train_video_transform = VideoTransform(subset="train", perform_time_mask=cfg.get("train_ds", {}).get("perform_time_mask_on_video", True))
             self.test_video_transform = VideoTransform(subset="test")
             self.use_preextracted_dino_features = False
         elif self.visual_encoder_type.startswith('dinov3'):
@@ -1147,7 +1147,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
             else:
                 # video_frames: BxTxSxCxHxW
                 # B - Batch, T - time, S - speakers, C - channels (1), H - height, W - width
-                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=20, batched=True)
 
                 # Shape: (B, T, S, C, D)
                 visual_embeds = av_feats
@@ -1260,6 +1260,8 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
         if self._optim_normalize_joint_txu:
             self._optim_normalize_txu = [encoded_len.max(), transcript_len.max()]
 
+        # print(loss_value)
+
         return {'loss': loss_value}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
@@ -1293,7 +1295,7 @@ class EncDecRNNTModelSTNOAV(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASR
                 visual_embeds = self.vis_feat_extractor(video_frames=None, video_lengths=visual_embed_lengths, attention_mask=None, dino_feats=visual_embeds).last_hidden_state.unsqueeze(2).unsqueeze(2) # Add spk,channel dim = 1 layer only.
                 video_lengths = visual_embed_lengths
             else:
-                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=10, batched=True)
+                av_feats = self.get_visual_feats(video_frames, video_lengths, num_speakers=num_speakers, inference_mode='chunk', chunk_length=20, batched=True)
                 visual_embeds = av_feats
                 visual_embed_lengths = video_lengths
                 if self.replace_zero_video_frames_with_zero_embeds:

@@ -218,7 +218,7 @@ class NonLinCrossFadeFusion(nn.Module):
             nn.Linear(d_model, d_model * 2),
             nn.LayerNorm(d_model * 2),
             nn.SiLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.1), # changed from 0.3
             nn.Linear(d_model * 2, d_model)
         )
         
@@ -344,7 +344,7 @@ class VisualConditioningModule(nn.Module):
                 xscale=True,
                 dropout_rate_emb=0.1,
             )
-            self.out_dropout = nn.Dropout(0.1)
+            self.out_dropout = nn.Dropout(0.2)
 
             device = next(self.parameters()).device
             dtype = next(self.parameters()).dtype

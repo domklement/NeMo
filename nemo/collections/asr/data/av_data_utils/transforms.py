@@ -9,6 +9,7 @@ import torchvision
 import random
 import numpy as np
 from python_speech_features import logfbank
+import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import functional as TF
 from torchvision.transforms.functional import InterpolationMode
@@ -234,19 +235,30 @@ def brightness_frame(frame, brightness_factor: float):
 
 
 class VideoTransform:
-    def __init__(self, subset):
+    def __init__(self, subset, perform_time_mask=True):
         if subset == "train":
+            if not perform_time_mask:
+                print("Skipping time masking on trainset.")
+
             self.video_pipeline = torch.nn.Sequential(
                 FunctionalModule(lambda x: x / 255.0),
                 torchvision.transforms.RandomCrop(88),
+
+                # ORIG
+                # torchvision.transforms.RandomRotation(10),
+                # torchvision.transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                # # torchvision.transforms.Grayscale(),
+                # AdaptiveTimeMask(10, 25),
+
+                # NEW augment
                 # torchvision.transforms.RandomRotation(10),
                 # torchvision.transforms.ColorJitter(brightness=0.2, contrast=0.2),
                 torchvision.transforms.GaussianBlur((5,5), (0.01, 0.5)),
                 TemporalRandomWalk1D(
                     frame_transform=rotate_frame,
-                    p=0.9,
-                    min_val=-12.0,
-                    max_val=12.0,
+                    p=0.5,
+                    min_val=-10.0,
+                    max_val=10.0,
                     alpha=0.2,
                     sigma=2,
                     mu=0.0,
@@ -254,7 +266,7 @@ class VideoTransform:
                 ),
                 TemporalRandomWalk1D(
                     frame_transform=brightness_frame,
-                    p=0.9,
+                    p=0.5,
                     min_val=-1,
                     max_val=1.0,
                     alpha=0.2,
@@ -263,7 +275,9 @@ class VideoTransform:
                     smooth_window=3,
                 ),
                 # torchvision.transforms.Grayscale(),
-                # AdaptiveTimeMask(50, 25),
+                # AdaptiveTimeMask(25, 3), # Recordings are shorter, it's pre-training afterall.
+                AdaptiveTimeMask(10, 40) if perform_time_mask else nn.Identity(), # ORIG params, 50 - 2x less masks than 25, 10 means max mask span width.
+
                 torchvision.transforms.Normalize(0.421, 0.165),
             )
         elif subset == "val" or subset == "test":

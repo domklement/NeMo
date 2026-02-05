@@ -43,6 +43,7 @@ from nemo.utils.get_rank import is_global_rank_zero
 from lhotse import load_manifest, CutSet, MonoCut, fastcopy
 from lhotse.cut import MixedCut
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
+from nemo.collections.asr.data.av_data_utils.transforms import AdaptiveTimeMask
 
 __all__ = [
     'LhotseAVToBPEAndSTNODataset',
@@ -431,6 +432,10 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         self.max_random_audio_mask_ratio = max_random_audio_mask_ratio
         self.return_all_spks = return_all_spks
 
+        self.audio_masking = None
+        if not self.val:
+            self.audio_masking = AdaptiveTimeMask(6000, 32000)
+
         # Disable audio masking during validation/validation-like usage
         if self.val:
             self.randomly_mask_audio_signal = False
@@ -454,6 +459,9 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
         if not self.randomly_mask_audio_signal or self.max_random_audio_mask_span_seconds <= 0.0:
             return None
         if audio_len_samples <= 0:
+            return None
+
+        if random.random() < 0.5:
             return None
 
         audio_len_seconds = audio_len_samples / float(self.sample_rate) if self.sample_rate > 0 else 0.0
@@ -636,9 +644,12 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
 
         if self.return_audio:
             # Optionally apply a random contiguous zero-mask to the audio signal (refactored)
-            mask_range = self._get_random_mask_range(int(audio_data.shape[0]))
-            if mask_range is not None:
-                audio_data = self._apply_mask_to_audio(audio_data, mask_range)
+            # mask_range = self._get_random_mask_range(int(audio_data.shape[0]))
+            # if mask_range is not None:
+            #     audio_data = self._apply_mask_to_audio(audio_data, mask_range)
+
+            if self.randomly_mask_audio_signal and not self.val and self.audio_masking is not None:
+                audio_data = self.audio_masking(audio_data)
 
             downsampled_freq = self.sample_rate / self.audio_downsampling_factor
             downsampled_fl_length = audio_data_len if audio_data_len % self.audio_downsampling_factor == 0 else audio_data_len + (self.audio_downsampling_factor - (audio_data_len % self.audio_downsampling_factor))
@@ -772,7 +783,7 @@ class LhotseAVToBPEAndSTNODataset(torch.utils.data.Dataset):
                 zero_frame_idxes = np.array([], dtype=np.int64)  # Not tracking zero frames for all speakers
             else:
                 if target_spk not in cut.custom[self.video_key]:
-                    raise ValueError(f"Speaker {target_spk} not found in video paths.")
+                    raise ValueError(f"Speaker {target_spk} not found in video paths {cut.custom[self.video_key]}.")
                 
                 if self.return_all_spks:
                     all_spk_video_frames = [
