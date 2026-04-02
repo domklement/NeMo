@@ -53,6 +53,7 @@ from nemo.core.neural_types import AudioSignal, LengthsType, NeuralType
 from nemo.core.neural_types.elements import ProbsType
 from nemo.utils import logging
 from nemo.collections.asr.losses.pit_wrapper import PITLossWrapper
+from nemo.collections.asr.losses.powerset_diarization_loss import PowerSetDiarizationLoss
 from nemo.collections.asr.parts.submodules.conformer_modules import ConformerFeedForward
 from nemo.collections.asr.parts.submodules.multi_head_attention import MultiHeadAttention
 
@@ -256,15 +257,31 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         self.max_batch_dur = self._cfg.get("max_batch_dur", 20000)
         self.concat_and_pad_script = torch.jit.script(concat_and_pad)
 
+        # Power-set loss configuration
+        self.use_powerset_loss = self._cfg.get("use_powerset_loss", False)
+        self.powerset_loss_weight = self._cfg.get("powerset_loss_weight", 1.0)
+        self.max_overlapping_speakers = self._cfg.get("max_overlapping_speakers", None)
+
         self.force_first_k_streams_to_be_active = self._cfg.get("force_first_k_streams_to_be_active", False)
         self.save_predictions = self._cfg.get("save_predictions", False)
         self.max_num_of_spks = self._cfg.get("max_num_of_spks", 4)
         self.use_bce_for_hungarian = self._cfg.get("use_bce_for_hungarian", False)
-        self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False)
+        self.use_transformer_attractors = self._cfg.get("use_transformer_attractors", False) and not self.use_powerset_loss
         self.ta_weights_init_constant = self._cfg.get("ta_weights_init_constant", 1)
         self.detach_attr_exist_loss = self._cfg.get("detach_attr_exist_loss", True)
         self.aux_attr_perp_loss_weight = self._cfg.get("aux_attr_perp_loss_weight", 0.0)
         self.aux_same_emb_loss_weight = self._cfg.get("aux_same_emb_loss_weight", 0.0)
+
+        # Initialize power-set loss if enabled
+        if self.use_powerset_loss:
+            self.powerset_loss = PowerSetDiarizationLoss(
+                num_speakers=self.max_num_of_spks,
+                max_overlapping_speakers=self.max_overlapping_speakers,
+                temperature=self._cfg.get("powerset_temperature", 1.0),
+                label_smoothing=self._cfg.get("powerset_label_smoothing", 0.0),
+            )
+            self.logit_dp = nn.Dropout(p=self._cfg.get("powerset_logit_dropout", 0.1))
+            self.logit_proj = nn.Linear(self._cfg.model_defaults.d_model, self.powerset_loss.powerset.num_powerset_classes)
 
         if self.use_transformer_attractors:
             self.transformer_attractors = TransformerAttractors(
@@ -284,7 +301,7 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
             if self.use_scaled_cos_sim_for_attr_dot:
                 self.attr_dot_scale = nn.Parameter(torch.tensor(self._cfg.get("attr_dot_scale_init_val", 1.0)))
 
-        else:
+        elif not self.use_powerset_loss:
             self.sortformer_modules = EENDSpkBuffEncLabelModel.from_config_dict(self._cfg.sortformer_modules).to(
                 self.device
             )
@@ -708,12 +725,16 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
             attractors = None
             attr_logits = None
-            if self.use_transformer_attractors:
-                # preds are logits here!
-                preds, attractors, attr_logits = self.forward_infer_transformer_attractors(global_tokens, emb_seq, emb_seq_length)
+            if self.use_powerset_loss:
+                emb_seq = self.logit_dp(emb_seq)
+                preds = self.logit_proj(emb_seq)
             else:
-                # preds are logits here as well now!
-                preds = self.forward_infer(emb_seq, emb_seq_length)
+                if self.use_transformer_attractors:
+                    # preds are logits here!
+                    preds, attractors, attr_logits = self.forward_infer_transformer_attractors(global_tokens, emb_seq, emb_seq_length)
+                else:
+                    # preds are logits here as well now!
+                    preds = self.forward_infer(emb_seq, emb_seq_length)
 
         return emb_seq, emb_seq_length, preds, attractors, attr_logits
 
@@ -996,9 +1017,17 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         Returns:
             (dict): A dictionary containing the following training metrics.
         """
+        if self.use_powerset_loss:
+            ps_preds = preds
+            preds = self.powerset_loss.powerset.to_multilabel(preds)*0.99+0.005
+            preds = torch.log(preds / (1-preds)) # logits
+
         n_speakers, targets_pil, perm_inds = self._get_permuted_labels(preds, targets, target_lens)
 
-        loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
+        if self.use_powerset_loss:
+            loss = self.compute_loss(ps_preds, targets_pil, target_lens, attr_logits)
+        else:
+            loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
 
         self._accuracy_train(torch.nn.functional.sigmoid(preds), targets_pil, target_lens)
         train_f1_acc, train_precision, train_recall = self._accuracy_train.compute()
@@ -1034,26 +1063,27 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             train_metrics = self._get_aux_train_evaluations(preds.float(), targets.float(), target_lens, attr_logits=attr_logits)
 
-        # Aux losses
-        aux_attr_labels = torch.eye(self.max_num_of_spks, device=attractors.device, dtype=torch.float32).unsqueeze(0).repeat((targets.shape[0], 1, 1))
-        attr_cos_sims = torch.bmm((attractors / attractors.norm(dim=-1).unsqueeze(-1)), (attractors / attractors.norm(dim=-1).unsqueeze(-1)).transpose(-1,-2)).float()
-        aux_attr_perp_loss = torch.nn.functional.mse_loss(attr_cos_sims, aux_attr_labels)
+        if self.use_transformer_attractors:
+            # Aux losses
+            aux_attr_labels = torch.eye(self.max_num_of_spks, device=attractors.device, dtype=torch.float32).unsqueeze(0).repeat((targets.shape[0], 1, 1))
+            attr_cos_sims = torch.bmm((attractors / attractors.norm(dim=-1).unsqueeze(-1)), (attractors / attractors.norm(dim=-1).unsqueeze(-1)).transpose(-1,-2)).float()
+            aux_attr_perp_loss = torch.nn.functional.mse_loss(attr_cos_sims, aux_attr_labels)
 
-        # Aux Emb loss
-        same_emb_loss = 0
-        num_spks = 0
-        for i in range(emb_seq.shape[0]):
-            for j in range(targets.shape[-1]):
-                if targets[i, :, j].sum() > 0:
-                    spks_embeds = emb_seq[i, ...][targets[i, :, j].bool()]
-                    same_emb_loss += torch.nn.functional.mse_loss(spks_embeds, spks_embeds.mean(dim=0))
-                    num_spks += 1
+            # Aux Emb loss
+            same_emb_loss = 0
+            num_spks = 0
+            for i in range(emb_seq.shape[0]):
+                for j in range(targets.shape[-1]):
+                    if targets[i, :, j].sum() > 0:
+                        spks_embeds = emb_seq[i, ...][targets[i, :, j].bool()]
+                        same_emb_loss += torch.nn.functional.mse_loss(spks_embeds, spks_embeds.mean(dim=0))
+                        num_spks += 1
 
-        same_emb_loss = same_emb_loss / num_spks
+            same_emb_loss = same_emb_loss / num_spks
 
-        train_metrics['aux_loss/aux_attr_perp_loss'] = aux_attr_perp_loss
-        train_metrics['aux_loss/same_emb_loss'] = same_emb_loss
-        train_metrics['loss/loss'] = train_metrics['loss/loss'] + self.aux_attr_perp_loss_weight*aux_attr_perp_loss + self.aux_same_emb_loss_weight*same_emb_loss
+            train_metrics['aux_loss/aux_attr_perp_loss'] = aux_attr_perp_loss
+            train_metrics['aux_loss/same_emb_loss'] = same_emb_loss
+            train_metrics['loss/loss'] = train_metrics['loss/loss'] + self.aux_attr_perp_loss_weight*aux_attr_perp_loss + self.aux_same_emb_loss_weight*same_emb_loss
 
 
         total_silence = 0
@@ -1096,32 +1126,17 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         return n_speakers, targets_pil, perm_inds
     
     def compute_loss(self, preds, targets_pil, target_lens, attr_logits=None):
+        if self.use_powerset_loss:
+            loss, batch_accuracy = self.powerset_loss(preds, targets_pil, target_lens, return_batch_accuracy=True)
+            return {
+                'loss': loss,
+                'diar_loss': loss,
+                'batch_accuracy': batch_accuracy,
+            }
+
         if self.use_transformer_attractors:
             if attr_logits is None:
                 raise ValueError("attr_probs is required when use_transformer_attractors is True")
-
-            # max_num_spks = 0
-            # for i in range(targets_pil.shape[0]):
-            #     n_speakers = (targets_pil[i].long().sum(0) > 0).sum()
-            #     targets_pil[i, :, n_speakers:] = -1
-            #     max_num_spks = max(max_num_spks, n_speakers)
-
-            # logits_list = [preds[k, : target_lens[k], :] for k in range(preds.shape[0])]
-            # targets_list = [targets_pil[k, : target_lens[k], :] for k in range(targets_pil.shape[0])]
-            # logits = torch.cat(logits_list, dim=0)
-            # labels = torch.cat(targets_list, dim=0)
-
-            # logits = logits.reshape(-1)
-            # labels = labels.reshape(-1)
-
-            # # loss = self.loss(probs=preds, labels=targets_pil, target_lens=target_lens)
-            # loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, (labels>0).float(), reduction='none')
-            # loss[torch.where(labels == -1)] = 0
-            # loss = torch.sum(loss) / (labels != -1).sum()
-            # loss = torch.sum(loss, axis=0) / (labels != -1).sum(axis=0)
-            
-            # loss[max_num_spks:] = 0
-            # loss = loss.mean()
 
             # max_num_spks = 0
             n_speakers = []
@@ -1190,6 +1205,11 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
         Returns:
             val_metrics (dict): A dictionary containing the following validation metrics
         """
+        if self.use_powerset_loss:
+            ps_preds = preds
+            preds = self.powerset_loss.powerset.to_multilabel(preds)*0.99+0.005
+            preds = torch.log(preds / (1-preds)) # logits
+
         n_speakers, targets_pil, perm_inds = self._get_permuted_labels(preds, targets, target_lens)
 
         if self.save_predictions:
@@ -1209,7 +1229,10 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
                 output[:, 1::2] = torch.nn.functional.sigmoid(preds[i]).detach().cpu() # Odd indices get tensor b
                 torchaudio.save(save_path, output.T.float(), sample_rate=16000, format="wav", encoding="PCM_F")
 
-        loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
+        if self.use_powerset_loss:
+            loss = self.compute_loss(ps_preds, targets_pil, target_lens, attr_logits)
+        else:
+            loss = self.compute_loss(preds, targets_pil, target_lens, attr_logits)
 
         self._accuracy_valid(torch.nn.functional.sigmoid(preds), targets_pil, target_lens)
         val_f1_acc, val_precision, val_recall = self._accuracy_valid.compute()
@@ -1268,7 +1291,10 @@ class EENDSpkBuffEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMix
 
         with torch.amp.autocast(enabled=False, device_type='cuda' if self.trainer.accelerator.__class__.__name__ == 'CUDAAccelerator' else 'cpu'):
             val_metrics = self._get_aux_validation_evaluations(preds.float(), targets.float(), target_lens, uniq_ids, attr_logits=attr_logits)
-            self._der_valid.update(torch.nn.functional.sigmoid(preds), targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
+            if self.use_powerset_loss:
+                self._der_valid.update(self.powerset_loss.powerset.to_multilabel(preds), targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
+            else:
+                self._der_valid.update(torch.nn.functional.sigmoid(preds), targets, target_lens, utt_ids=uniq_ids, offsets=offsets, rttm_file_paths=rttm_file_paths)
         if isinstance(self.trainer.val_dataloaders, list) and len(self.trainer.val_dataloaders) > 1:
             self.validation_step_outputs[dataloader_idx].append(val_metrics)
         else:

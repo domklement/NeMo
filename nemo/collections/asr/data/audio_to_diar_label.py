@@ -1471,7 +1471,7 @@ class _AudioToSpeechE2ESpkDiarRandomChunkDataset(Dataset):
         num_spks: int,
         featurizer,
         window_stride: float,
-        min_subsegment_duration: float = 0.03,
+        min_subsegment_duration: float = 0.01,
         global_rank: int = 0,
         dtype=torch.float16,
         round_digits: int = 2,

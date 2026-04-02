@@ -1,39 +1,34 @@
 #!/bin/bash
 
-# export NCCL_DEBUG=INFO
-# export TORCH_DISTRIBUTED_DEBUG=INFO
-
-# manifest_path="/storage/brno12-cerit/home/dklement/speech/ASR/NeMo/misc/manifests"
-manifest_path="/tmp/dicow_data/nemo_manifests"
-tokenizers_path="/tmp/tokenizers"
-
 python /home/jovyan/NeMo/examples/speaker_tasks/diarization/neural_diarizer/eend_spk_buffer_diar_train.py \
     --config-path=/home/jovyan/NeMo/examples/speaker_tasks/diarization/conf/neural_diarizer \
     --config-name=eend_spk_buff.yaml \
-    model.train_ds.manifest_filepath=/tmp/librispeech/simulated/datasets_noise_balanced_v2/manifests/all_train_nemo_manifest.jsonl \
-    model.validation_ds.manifest_filepath=/tmp/librispeech/simulated/datasets_noise_balanced_v2/manifests/all_val_nemo_manifest.jsonl \
+    model.train_ds.manifest_filepath=/mnt/scratch/tmp/xkleme15/compound_jiangyu_dataset/data_ssd/train/nemo_manifest_16s_4spk.jsonl \
+    model.validation_ds.manifest_filepath=/mnt/scratch/tmp/xkleme15/compound_jiangyu_dataset/data_ssd/dev/nemo_manifest_16s_4spk.jsonl \
     +model.train_ds.equalize_recording_lengths=False \
     trainer.devices=-1 \
     trainer.accelerator=gpu \
     trainer.strategy=ddp \
     +model.use_powerset_loss=true \
+    model.optim.weight_decay=0.001 \
     model.max_num_of_spks=4 \
     +model.max_overlapping_speakers=2 \
     trainer.max_epochs=1000 \
     trainer.log_every_n_steps=10 \
-    +trainer.check_val_every_n_epoch=1 \
+    trainer.val_check_interval=0.5 \
     model.train_ds.batch_size=64 \
+    model.validation_ds.batch_size=128 \
     trainer.accumulate_grad_batches=1 \
-    model.train_ds.session_len_sec=240 \
+    model.train_ds.session_len_sec=16 \
+    model.validation_ds.session_len_sec=16 \
     model.train_ds.num_workers=10 \
-    model.optim.lr=1.4e-4 \
-    model.optim.weight_decay=0.0 \
+    model.optim.lr=1e-5 \
     model.optim.sched.min_lr=1e-7 \
-    model.validation_ds.batch_size=1 \
-    model.model_defaults.d_model=256 \
+    model.model_defaults.d_model=512 \
     +model.encoder.prepend_global_tokens=false \
     +model.use_transformer_attractors=false \
     +model.attr_loss_weight=0.1 \
+    +model.powerset_logit_dropout=0.1 \
     +model.encoder.spk_buffer_size=32 \
     +model.encoder.use_ce_spk_buffer=false \
     +model.encoder.use_ce_spk_buffer_bias=true \
@@ -46,16 +41,16 @@ python /home/jovyan/NeMo/examples/speaker_tasks/diarization/neural_diarizer/eend
     +model.attr_dot_scale_init_val=10.0 \
     +model.ta_dropout_att=0.1 \
     +model.ta_attr_dropout=0.1 \
-    model.encoder.n_layers=6 \
+    model.encoder.n_layers=18 \
     model.encoder.att_context_size=[-1,-1] \
-    model.encoder.self_attention_model=no_pos_emb \
+    model.encoder.self_attention_model=rel_pos \
     model.encoder.att_context_style=regular \
-    +model.encoder.global_tokens=1 \
+    +model.encoder.global_tokens=0 \
     +model.encoder.global_tokens_spacing=1 \
     +model.encoder.global_attn_separate=false \
-    model.optim.sched.warmup_steps=100000 \
+    model.optim.sched.warmup_steps=25000 \
     +evaluate_at_start=False \
-    +init_from_nest=False \
+    +init_from_nest=True \
     +init_conv_downsampling_from_nest=False \
     +freeze_conv_downsampling=False \
     +decode_only=False \
@@ -64,5 +59,5 @@ python /home/jovyan/NeMo/examples/speaker_tasks/diarization/neural_diarizer/eend
     exp_manager.create_wandb_logger=True \
     +trainer.gradient_clip_val=5.0 \
     exp_manager.wandb_logger_kwargs.project=dk_nemo_diar_postjsalt \
-    exp_manager.wandb_logger_kwargs.name=6l_256d_9ks_128ctx_pil_lr_1.4e-4_warmup_100k_5.0_gc_2spks_la_no_sb_sce_240s_attr_lsmix_pretrain_64bs_nocossim_1gtoken_nodet_att_l_0.1_veclrmul_1_v2 \
-    name=6l_256d_9ks_128ctx_pil_lr_1.4e-4_warmup_100k_5.0_gc_2spks_la_no_sb_sce_240s_attr_lsmix_pretrain_64bs_nocossim_1gtoken_nodet_att_l_0.1_veclrmul_1_v2 \
+    exp_manager.wandb_logger_kwargs.name=nest-1ctx_25k_wramup_5e-5_lr_powerset_4spk_max2ov_16s_diarizenlike_compound_ft_bs64_dp0.1 \
+    name=nest-1ctx_25k_wramup_5e-5_lr_powerset_4spk_max2ov_16s_diarizenlike_compound_ft_bs64_dp0.1

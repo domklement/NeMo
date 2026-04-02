@@ -50,6 +50,7 @@ def main(cfg):
         model_cfg.pop('train_ds')
         model_cfg.pop('validation_ds')
         model_cfg.pop('test_ds')
+        model_cfg.pop('optim')
         cfg.model = {**cfg.model, **model_cfg}
 
     exp_manager(trainer, cfg.get("exp_manager", None))
@@ -79,7 +80,7 @@ def main(cfg):
             p.requires_grad = False
 
     if cfg.get('load_everything_from_ptl_ckpt', False):
-        eend_model.load_state_dict(x['state_dict'])
+        print('Loading everything from pretrained ckpt:', eend_model.load_state_dict(x['state_dict']))
     else:
         eend_model.maybe_init_from_pretrained_checkpoint(cfg)
 
